@@ -725,6 +725,56 @@ fn duplicate_note_ids_render_one_definition() {
 }
 
 #[test]
+fn rendered_note_assets_follow_definition_order_and_exclude_duplicates() {
+    let document = Document {
+        blocks: vec![Block::Paragraph(vec![
+            Inline::NoteRef("b".into()),
+            Inline::NoteRef("a".into()),
+        ])],
+        source_units: Vec::new(),
+        notes: vec![
+            note(
+                "a",
+                vec![Block::Paragraph(vec![Inline::Image {
+                    alt: "second".into(),
+                    source: ImageSource::Asset(AssetId(0)),
+                }])],
+            ),
+            note(
+                "b",
+                vec![Block::Paragraph(vec![Inline::Image {
+                    alt: "first".into(),
+                    source: ImageSource::Asset(AssetId(1)),
+                }])],
+            ),
+            note(
+                "b",
+                vec![Block::Paragraph(vec![Inline::Image {
+                    alt: "duplicate".into(),
+                    source: ImageSource::Asset(AssetId(2)),
+                }])],
+            ),
+        ],
+        assets: (0..3)
+            .map(|id| Asset {
+                id: AssetId(id),
+                media_type: "image/png".into(),
+                origin_part: format!("image{id}.png"),
+                bytes: vec![id as u8],
+            })
+            .collect(),
+    };
+
+    let rendered = render_document(&document);
+    let trailing = rendered.parts.last().expect("note definitions produce a part");
+
+    assert!(trailing.markdown.contains("[^1]: first"));
+    assert!(trailing.markdown.contains("[^2]: second"));
+    assert!(!trailing.markdown.contains("duplicate"));
+    assert_eq!(trailing.asset_ids, vec![AssetId(1), AssetId(0)]);
+}
+
+#[test]
 fn task_list() {
     let md = doc(vec![Block::List(List {
         marker: MarkerKind::Bullet,

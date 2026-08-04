@@ -125,6 +125,10 @@ fn render_document_markdown(doc: &Document, rc: &Ctx) -> String {
 }
 
 fn render_note_definitions(doc: &Document, rc: &Ctx) -> Vec<String> {
+    rendered_note_definitions(doc, rc).into_iter().map(|(_, markdown)| markdown).collect()
+}
+
+fn rendered_note_definitions<'a>(doc: &'a Document, rc: &Ctx) -> Vec<(&'a Note, String)> {
     let mut parts = Vec::new();
     let mut rendered_defs: HashSet<usize> = HashSet::new();
     let mut ordered: Vec<(&Note, usize)> =
@@ -150,7 +154,7 @@ fn render_note_definitions(doc: &Document, rc: &Ctx) -> Vec<String> {
                 s.push_str(line);
             }
         }
-        parts.push(s);
+        parts.push((note, s));
     }
     parts
 }
@@ -204,8 +208,23 @@ fn render_document_parts(doc: &Document, rc: &Ctx) -> Vec<RenderedPart> {
         }
     }
 
-    let note_markdown = render_note_definitions(doc, rc).join("\n\n");
-    let note_asset_ids = collect_asset_ids_from_notes(doc, &mut referenced_assets);
+    let note_definitions = rendered_note_definitions(doc, rc);
+    let note_markdown = note_definitions
+        .iter()
+        .map(|(_, markdown)| markdown.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let note_asset_ids = collect_asset_ids_from_notes(
+        note_definitions.iter().map(|(note, _)| *note),
+        &mut referenced_assets,
+    );
+    // Assets owned by dropped empty or duplicate notes are not unreferenced
+    // package assets: their content was intentionally omitted with the note.
+    for note in &doc.notes {
+        walk_asset_ids(&note.blocks, &mut |id| {
+            referenced_assets.insert(id);
+        });
+    }
     let unreferenced_asset_ids: Vec<AssetId> = doc
         .assets
         .iter()
@@ -282,10 +301,13 @@ fn collect_asset_ids(blocks: &[Block], all_seen: &mut HashSet<AssetId>) -> Vec<A
     ids
 }
 
-fn collect_asset_ids_from_notes(doc: &Document, all_seen: &mut HashSet<AssetId>) -> Vec<AssetId> {
+fn collect_asset_ids_from_notes<'a>(
+    notes: impl IntoIterator<Item = &'a Note>,
+    all_seen: &mut HashSet<AssetId>,
+) -> Vec<AssetId> {
     let mut note_seen = HashSet::new();
     let mut ids = Vec::new();
-    for note in &doc.notes {
+    for note in notes {
         walk_asset_ids(&note.blocks, &mut |id| {
             all_seen.insert(id);
             if note_seen.insert(id) {
