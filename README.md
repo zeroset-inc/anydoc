@@ -10,7 +10,9 @@ Fast Rust library that converts documents (Word, PowerPoint, Excel, OpenDocument
 
 Built by [Firecrawl](https://firecrawl.dev) to turn any office document into LLM-ready Markdown in single-digit milliseconds, with one consistent output no matter which format goes in. It powers [Firecrawl Parse](https://firecrawl.dev/parse), so if you'd rather not run it yourself, the hosted API gives you the same conversion plus our OCR models for the scanned pages anydoc can't read on its own.
 
-## Agent skill
+## Quick start
+
+### Agent skill
 
 anydoc ships as an [Agent Skill](https://agentskills.io), so your agent can read any document it runs into:
 
@@ -18,9 +20,7 @@ anydoc ships as an [Agent Skill](https://agentskills.io), so your agent can read
 npx skills add firecrawl/anydoc
 ```
 
-The [skill](skills/convert-documents-to-markdown/SKILL.md) teaches the agent to convert documents with the anydoc CLI, which never prompts and needs no install. Works with [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex/), [Cursor](https://cursor.com), [OpenCode](https://opencode.ai), and any other [compatible agent](https://agentskills.io/clients).
-
-## Quick start
+The [skill](skills/convert-documents-to-markdown/SKILL.md) teaches the agent to convert documents with the anydoc CLI. Works with [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex/), [Cursor](https://cursor.com), [OpenCode](https://opencode.ai), and any other [compatible agent](https://agentskills.io/clients).
 
 ### CLI
 
