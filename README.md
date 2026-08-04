@@ -4,10 +4,21 @@
 [![npm](https://img.shields.io/npm/v/@firecrawl/anydoc.svg)](https://www.npmjs.com/package/@firecrawl/anydoc)
 [![PyPI](https://img.shields.io/pypi/v/firecrawl-anydoc.svg)](https://pypi.org/project/firecrawl-anydoc/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![skills.sh](https://skills.sh/b/firecrawl/anydoc)](https://skills.sh/firecrawl/anydoc)
 
 Fast Rust library that converts documents (Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and PDF) into clean GitHub-Flavored Markdown. Includes bindings for [Node.js](node/README.md) and [Python](python/README.md).
 
 Built by [Firecrawl](https://firecrawl.dev) to turn any office document into LLM-ready Markdown in single-digit milliseconds, with one consistent output no matter which format goes in. It powers [Firecrawl Parse](https://firecrawl.dev/parse), so if you'd rather not run it yourself, the hosted API gives you the same conversion plus our OCR models for the scanned pages anydoc can't read on its own.
+
+## Agent skill
+
+anydoc ships as an [Agent Skill](https://agentskills.io), so your agent can read any document it runs into:
+
+```bash
+npx skills add firecrawl/anydoc
+```
+
+The [skill](skills/convert-documents-to-markdown/SKILL.md) teaches the agent to convert documents with the anydoc CLI, which never prompts and needs no install. Works with [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex/), [Cursor](https://cursor.com), [OpenCode](https://opencode.ai), and any other [compatible agent](https://agentskills.io/clients).
 
 ## Features
 
@@ -18,6 +29,7 @@ Built by [Firecrawl](https://firecrawl.dev) to turn any office document into LLM
 - **Fast.** Pure Rust, no ML models, no external services. Median conversion time is under 5ms per document.
 - **Bindings that stay out of the way.** Node.js conversion runs on the libuv thread pool and never blocks the event loop; Python releases the GIL so other threads keep running. TypeScript types and Python stubs ship with the packages.
 - **PDF support built in.** Text-based PDFs convert locally through [pdf-inspector](https://github.com/firecrawl/pdf-inspector), no OCR service required.
+- **Agent ready.** Ships as an [Agent Skill](#agent-skill): one `npx skills add firecrawl/anydoc` and any agent can read office documents.
 
 ## Supported formats
 
@@ -73,6 +85,16 @@ Speed is one warm conversion per document on a Ryzen 9 9950X3D (Windows 11, 64 G
 **Best fit:** pipelines that receive a mixed bag of office documents and need one consistent, structured Markdown output. In this comparison, anydoc was the only tool to cover all fourteen formats, scored highest on every judged format except EPUB, and converted documents an order of magnitude faster than the next-fastest tool.
 
 ## Quick start
+
+### CLI
+
+```bash
+npx @firecrawl/anydoc report.docx               # Markdown to stdout
+npx @firecrawl/anydoc slides.pptx -o slides.md  # or to a file
+npx @firecrawl/anydoc - --format csv < data.csv # read stdin
+```
+
+`npx` downloads the prebuilt binary for your platform on first run. For a permanent `anydoc` command, install globally with `npm install -g @firecrawl/anydoc`. Run `anydoc --help` for all options.
 
 ### Node.js
 
@@ -140,16 +162,6 @@ let markdown = anydoc::to_markdown_bytes(&bytes, anydoc::Format::Csv)?;
 
 // Or stop at the document model, which also carries embedded assets:
 let document = anydoc::to_document(&bytes, None)?;
-```
-
-### CLI
-
-A convert CLI ships in [`examples/`](examples/), in all three languages:
-
-```bash
-cargo run --release --example convert -- file.docx [-f csv] [-o out.md] [--assets dir]
-node examples/convert.mjs file.docx [-f csv] [-o out.md] [--assets dir]
-python examples/convert.py file.docx [-f csv] [-o out.md] [--assets dir]
 ```
 
 ## Format detection
