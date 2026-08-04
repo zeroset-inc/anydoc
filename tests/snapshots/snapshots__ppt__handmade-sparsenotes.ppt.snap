@@ -2,8 +2,16 @@
 source: tests/snapshots.rs
 expression: output
 ---
+<!-- anydoc:source-unit-start kind=slide ordinal=1 status=parsed -->
+
 First slide text
+
+<!-- anydoc:source-unit-end kind=slide ordinal=1 status=parsed -->
+
+<!-- anydoc:source-unit-start kind=slide ordinal=2 status=parsed -->
 
 Second slide text
 
 > Notes for the second slide
+
+<!-- anydoc:source-unit-end kind=slide ordinal=2 status=parsed -->

@@ -7,8 +7,8 @@ mod cascade;
 
 use crate::error::ConvertError;
 use crate::model::{
-    Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget, Style, TableKind,
-    inlines_are_empty,
+    Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget, SourceUnit,
+    SourceUnitKind, SourceUnitStatus, Style, TableKind, inlines_are_empty,
 };
 use crate::package::relationships::{
     RelTarget, Relationships, TargetMode, read_rels, rel_target_bytes, rel_type, rels_part_for,
@@ -89,6 +89,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     let mut layouts: HashMap<String, LayoutInfo> = HashMap::new();
     let mut masters: HashMap<String, MasterInfo> = HashMap::new();
     let mut blocks: Vec<Block> = Vec::new();
+    let mut source_units = Vec::with_capacity(slide_paths.len());
     let mut failed = 0usize;
     let instance_counter = StdCell::new(0u64);
     // Every slide has a start anchor id so internal slide-to-slide links
@@ -115,11 +116,21 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         .collect();
 
     for (slide_index, slide_path) in slide_paths.iter().enumerate() {
+        let start_block = blocks.len();
         let tree = match pkg.borrow_mut().optional_xml_part(slide_path)? {
             Some(t) => t,
             None => {
                 log::warn!("skipping unusable slide {slide_path}");
                 failed += 1;
+                source_units.push(SourceUnit {
+                    kind: SourceUnitKind::Slide,
+                    ordinal: slide_index + 1,
+                    name: None,
+                    status: SourceUnitStatus::Skipped,
+                    reason: Some("missing_or_unreadable_part".into()),
+                    start_block,
+                    end_block: blocks.len(),
+                });
                 continue;
             }
         };
@@ -130,6 +141,15 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         else {
             log::warn!("skipping slide {slide_path}: no shape tree");
             failed += 1;
+            source_units.push(SourceUnit {
+                kind: SourceUnitKind::Slide,
+                ordinal: slide_index + 1,
+                name: None,
+                status: SourceUnitStatus::Skipped,
+                reason: Some("missing_shape_tree".into()),
+                start_block,
+                end_block: blocks.len(),
+            });
             continue;
         };
         let slide_rels = &all_rels[slide_index];
@@ -204,13 +224,26 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
                 blocks.push(Block::BlockQuote(notes_blocks));
             }
         }
+        source_units.push(SourceUnit {
+            kind: SourceUnitKind::Slide,
+            ordinal: slide_index + 1,
+            name: None,
+            status: if start_block == blocks.len() {
+                SourceUnitStatus::Empty
+            } else {
+                SourceUnitStatus::Parsed
+            },
+            reason: None,
+            start_block,
+            end_block: blocks.len(),
+        });
     }
     if failed == slide_paths.len() {
         return Err(ConvertError::malformed("no slide in the presentation could be read"));
     }
 
     let assets = std::mem::take(&mut assets.borrow_mut().assets);
-    Ok(Document { blocks, notes: Vec::new(), assets })
+    Ok(Document { blocks, source_units, notes: Vec::new(), assets })
 }
 
 fn rel_target_of_type(rels: &Relationships, base: &str, rel_type: &str) -> Option<String> {

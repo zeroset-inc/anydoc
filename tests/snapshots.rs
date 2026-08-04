@@ -11,6 +11,7 @@ mod common;
 
 use common::{fixture_root, walk};
 use std::fmt::Write as _;
+use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
 /// Convert one file, capturing panics so a bad parser records a baseline
@@ -126,6 +127,110 @@ fn embedded_ole_payload_is_retained() {
         .find(|a| a.media_type == "application/vnd.ms-ole-object")
         .expect("OLE payload retained as an asset");
     assert_eq!(ole.bytes, b"OLE-PAYLOAD-STAND-IN".repeat(4));
+}
+
+#[test]
+fn presentation_frontends_preserve_slide_ranges() {
+    use anydoc::{Format, model::SourceUnitKind};
+    let cases = [
+        ("pptx/pres.pptx", Format::Pptx),
+        ("ppt/pres.ppt", Format::Ppt),
+        ("odp/pres.odp", Format::Odp),
+    ];
+    for (relative, format) in cases {
+        let bytes = std::fs::read(fixture_root().join(relative)).unwrap();
+        let doc = anydoc::to_document(&bytes, format).unwrap();
+        assert_eq!(doc.source_units.len(), 2, "{relative}");
+        let mut prior_end = 0;
+        for (index, unit) in doc.source_units.iter().enumerate() {
+            assert_eq!(unit.kind, SourceUnitKind::Slide, "{relative}");
+            assert_eq!(unit.ordinal, index + 1, "{relative}");
+            assert_eq!(unit.start_block, prior_end, "{relative}");
+            assert!(unit.end_block >= unit.start_block, "{relative}");
+            prior_end = unit.end_block;
+        }
+        assert_eq!(prior_end, doc.blocks.len(), "{relative}");
+    }
+}
+
+fn replace_zip_part(bytes: &[u8], target: &str, replacement: &[u8]) -> Vec<u8> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).unwrap();
+        let name = file.name().to_string();
+        let options =
+            zip::write::SimpleFileOptions::default().compression_method(file.compression());
+        writer.start_file(&name, options).unwrap();
+        if name == target {
+            writer.write_all(replacement).unwrap();
+        } else {
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).unwrap();
+            writer.write_all(&data).unwrap();
+        }
+    }
+    writer.finish().unwrap().into_inner()
+}
+
+#[test]
+fn pptx_preserves_an_empty_slide_before_content() {
+    let bytes = std::fs::read(fixture_root().join("pptx/handmade-links.pptx")).unwrap();
+    let empty_slide = br#"<?xml version="1.0" encoding="UTF-8"?>
+        <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:cSld><p:spTree/></p:cSld>
+        </p:sld>"#;
+    let bytes = replace_zip_part(&bytes, "ppt/slides/slide1.xml", empty_slide);
+    let doc = anydoc::to_document(&bytes, anydoc::Format::Pptx).unwrap();
+    assert_eq!(doc.source_units.len(), 2);
+    assert_eq!(doc.source_units[0].status, anydoc::model::SourceUnitStatus::Empty);
+    assert_eq!((doc.source_units[0].start_block, doc.source_units[0].end_block), (0, 0));
+    assert_eq!(doc.source_units[1].start_block, 0);
+    assert_eq!(doc.source_units[1].end_block, doc.blocks.len());
+}
+
+#[test]
+fn pptx_reports_a_slide_whose_shape_tree_is_missing() {
+    let bytes = std::fs::read(fixture_root().join("pptx/handmade-links.pptx")).unwrap();
+    let unusable_slide = br#"<?xml version="1.0" encoding="UTF-8"?>
+        <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:cSld/>
+        </p:sld>"#;
+    let bytes = replace_zip_part(&bytes, "ppt/slides/slide1.xml", unusable_slide);
+    let doc = anydoc::to_document(&bytes, anydoc::Format::Pptx).unwrap();
+    assert_eq!(doc.source_units.len(), 2);
+    assert_eq!(doc.source_units[0].status, anydoc::model::SourceUnitStatus::Skipped);
+    assert_eq!(doc.source_units[0].reason.as_deref(), Some("missing_shape_tree"));
+    assert_eq!((doc.source_units[0].start_block, doc.source_units[0].end_block), (0, 0));
+}
+
+#[test]
+fn odp_preserves_empty_named_pages() {
+    let bytes = std::fs::read(fixture_root().join("odp/pres.odp")).unwrap();
+    let content = br#"<?xml version="1.0" encoding="UTF-8"?>
+        <office:document-content
+          xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+          xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+          xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0"
+          xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+          <office:body><office:presentation>
+            <draw:page draw:name="Empty"/>
+            <draw:page draw:name="Content">
+              <draw:frame presentation:class="body"><draw:text-box>
+                <text:p>Second page</text:p>
+              </draw:text-box></draw:frame>
+            </draw:page>
+          </office:presentation></office:body>
+        </office:document-content>"#;
+    let bytes = replace_zip_part(&bytes, "content.xml", content);
+    let doc = anydoc::to_document(&bytes, anydoc::Format::Odp).unwrap();
+    assert_eq!(doc.source_units.len(), 2);
+    assert_eq!(doc.source_units[0].name.as_deref(), Some("Empty"));
+    assert_eq!(doc.source_units[0].status, anydoc::model::SourceUnitStatus::Empty);
+    assert_eq!((doc.source_units[0].start_block, doc.source_units[0].end_block), (0, 0));
+    assert_eq!(doc.source_units[1].name.as_deref(), Some("Content"));
+    assert_eq!(doc.source_units[1].start_block, 0);
+    assert_eq!(doc.source_units[1].end_block, doc.blocks.len());
 }
 
 /// Standard Word OLE markup places a VML preview image next to the

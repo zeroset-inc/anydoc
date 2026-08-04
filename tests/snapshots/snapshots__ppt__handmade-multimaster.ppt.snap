@@ -2,6 +2,14 @@
 source: tests/snapshots.rs
 expression: output
 ---
+<!-- anydoc:source-unit-start kind=slide ordinal=1 status=parsed -->
+
 - **Alpha master body text**
 
+<!-- anydoc:source-unit-end kind=slide ordinal=1 status=parsed -->
+
+<!-- anydoc:source-unit-start kind=slide ordinal=2 status=parsed -->
+
 *Beta master body text*
+
+<!-- anydoc:source-unit-end kind=slide ordinal=2 status=parsed -->

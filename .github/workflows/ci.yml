@@ -69,7 +69,7 @@ jobs:
           python-version: '3.13'
       - run: pip install maturin
       - run: maturin build --release --locked --manifest-path python/Cargo.toml --out dist
-      - run: pip install --no-index --find-links dist firecrawl-anydoc
+      - run: pip install --no-index --find-links dist zeroset-anydoc
       # Must run from the repo root: with python/ as cwd, the source anydoc/
       # package dir shadows the installed compiled module.
       - run: python -m unittest discover -s python/tests
