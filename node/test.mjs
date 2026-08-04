@@ -1,8 +1,12 @@
 // Smoke test: the bindings load and every entry point round-trips a fixture.
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
+import { promisify } from 'node:util'
 
 import {
   formatFromBytes,
@@ -66,4 +70,59 @@ test('format detection reads content, extension, and path', async () => {
 
 test('conversion errors reject with the crate error message', async () => {
   await assert.rejects(toMarkdownBytes(Buffer.from('not a document'), 'docx'), /malformed|unsupported/)
+})
+
+const CLI = fileURLToPath(new URL('./cli.js', import.meta.url))
+
+// execFile rejects on a non-zero exit; the error carries code/stdout/stderr.
+const runCli = (args, options) =>
+  promisify(execFile)(process.execPath, [CLI, ...args], options).catch((error) => error)
+
+test('cli converts a file to stdout', async () => {
+  const { code, stdout, stderr } = await runCli([OUTLINE])
+  assert.equal(code, undefined)
+  assert.match(stdout, /^# /m)
+  assert.equal(stderr, '')
+})
+
+test('cli writes to --output instead of stdout', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'anydoc-cli-'))
+  try {
+    const out = join(dir, 'outline.md')
+    const { code, stdout } = await runCli([OUTLINE, '-o', out])
+    assert.equal(code, undefined)
+    assert.equal(stdout, '')
+    assert.match(await readFile(out, 'utf8'), /^# /m)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('cli reads stdin with an explicit format', async () => {
+  const child = promisify(execFile)(process.execPath, [CLI, '-', '--format', 'csv'])
+  child.child.stdin.end(await readFile(CSV))
+  const { stdout } = await child
+  assert.match(stdout, /\| --- \|/)
+})
+
+test('cli exits 1 when the document cannot be converted', async () => {
+  const { code, stderr } = await runCli(['no-such-file.docx'])
+  assert.equal(code, 1)
+  assert.match(stderr, /^anydoc: /)
+})
+
+test('cli exits 2 on usage errors', async () => {
+  for (const args of [[], ['--frmat', 'csv', CSV], ['--format', 'nope', CSV], [OUTLINE, RICH]]) {
+    const { code, stderr } = await runCli(args)
+    assert.equal(code, 2)
+    assert.match(stderr, /^anydoc: /)
+  }
+})
+
+test('cli help and version go to stdout and exit 0', async () => {
+  const help = await runCli(['--help'])
+  assert.equal(help.code, undefined)
+  assert.match(help.stdout, /Exit codes:/)
+  const version = await runCli(['--version'])
+  assert.match(version.stdout.trim(), /^\d+\.\d+\.\d+/)
 })

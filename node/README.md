@@ -24,6 +24,18 @@ npm install @firecrawl/anydoc
 | CSV              | `.csv`                                                     |
 | PDF              | `.pdf`                                                     |
 
+## CLI
+
+The package ships an `anydoc` command, so `npx` converts a document with no install:
+
+```bash
+npx @firecrawl/anydoc report.docx               # Markdown to stdout
+npx @firecrawl/anydoc slides.pptx -o slides.md  # or to a file
+npx @firecrawl/anydoc - --format csv < data.csv # read stdin
+```
+
+Markdown goes to stdout, errors to stderr, and `anydoc --help` covers the rest.
+
 ## Usage
 
 ```js
