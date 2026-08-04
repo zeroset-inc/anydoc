@@ -361,6 +361,10 @@ mod tests {
         )
     }
 
+    fn shape_anchor() -> &'static str {
+        r#"<xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:ext cx="1" cy="1"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="1" name="Shape"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>"#
+    }
+
     /// Minimal XLSX with one worksheet drawing and one shared image part.
     fn xlsx_with_images(
         sheet_data: &str,
@@ -608,6 +612,16 @@ mod tests {
         assert!(doc.assets.is_empty());
         assert_eq!(doc.source_units[0].status, SourceUnitStatus::Skipped);
         assert_eq!(doc.source_units[0].reason.as_deref(), Some("worksheet_drawing_unreadable"));
+    }
+
+    #[test]
+    fn non_picture_drawing_anchor_does_not_degrade_the_sheet() {
+        let doc = parse(&xlsx_with_images("", None, shape_anchor(), images::IMAGE_REL)).unwrap();
+
+        assert!(doc.blocks.is_empty());
+        assert!(doc.assets.is_empty());
+        assert_eq!(doc.source_units[0].status, SourceUnitStatus::Empty);
+        assert_eq!(doc.source_units[0].reason, None);
     }
 
     #[test]
