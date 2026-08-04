@@ -2,8 +2,8 @@
 requires = ["maturin>=1.9,<2"]
 build-backend = "maturin"
 
-# The internal distribution installs as `zeroset-anydoc` and imports as
-# `anydoc`. A distinct name prevents accidental resolution to upstream PyPI.
+# The fork distribution installs as `zeroset-anydoc` and imports as `anydoc`.
+# A distinct name keeps its release history separate from upstream AnyDoc.
 [project]
 name = "zeroset-anydoc"
 description = "Convert documents (doc, docx, odt, rtf, epub, pdf, presentations, spreadsheets, csv) to GitHub-Flavored Markdown"
