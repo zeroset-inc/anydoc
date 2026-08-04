@@ -32,6 +32,7 @@ class AnydocTest(unittest.TestCase):
 
     def test_to_document_exposes_the_document_model(self):
         document = anydoc.to_document(OUTLINE.read_bytes(), "docx")
+        self.assertEqual(document.markdown, anydoc.to_markdown_bytes(OUTLINE.read_bytes(), "docx"))
         heading = next(block for block in document.blocks if block.kind == "heading")
         self.assertTrue(1 <= heading.level <= 6)
         self.assertIsInstance(heading.content[0].text, str)
@@ -44,6 +45,10 @@ class AnydocTest(unittest.TestCase):
         self.assertIsInstance(image.data, bytes)
         self.assertGreater(len(image.data), 0)
         self.assertEqual(image.id, document.assets.index(image))
+        self.assertEqual(
+            {asset_id for part in document.rendered_parts for asset_id in part.asset_ids},
+            {asset.id for asset in document.assets},
+        )
 
     def test_to_document_exposes_source_units(self):
         document = anydoc.to_document(PRESENTATION.read_bytes(), "pptx")
@@ -56,6 +61,12 @@ class AnydocTest(unittest.TestCase):
         self.assertIsNone(first.reason)
         self.assertEqual(first.start_block, 0)
         self.assertGreater(first.end_block, first.start_block)
+        self.assertEqual(len(document.rendered_parts), len(document.source_units))
+        first_part = document.rendered_parts[0]
+        self.assertEqual(first_part.source_unit_index, 0)
+        self.assertEqual(first_part.start_block, first.start_block)
+        self.assertEqual(first_part.end_block, first.end_block)
+        self.assertTrue(first_part.markdown)
 
     def test_format_detection_reads_content_extension_and_path(self):
         self.assertEqual(anydoc.format_from_bytes(RICH.read_bytes()), "docx")

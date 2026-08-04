@@ -8,7 +8,9 @@ mod table;
 #[cfg(test)]
 mod tests;
 
-use crate::model::{Block, Document, Inline, List, MarkerKind, Note, TableKind, inlines_are_empty};
+use crate::model::{
+    AssetId, Block, Document, Inline, List, MarkerKind, Note, TableKind, inlines_are_empty,
+};
 use anchors::{AnchorMap, resolve_anchors};
 use escape::{EscapeOpts, InlineContext, backtick_fence, escape_text};
 use inline::render_inlines;
@@ -37,40 +39,93 @@ pub(crate) struct Ctx {
     anchors: AnchorMap,
 }
 
+/// Markdown and provenance for one ordered range of a rendered document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedPart {
+    /// Markdown for this range, without source-unit boundary comments.
+    pub markdown: String,
+    /// Index into [`Document::source_units`], or `None` for unowned content.
+    pub source_unit_index: Option<usize>,
+    /// First top-level block covered by this part.
+    pub start_block: usize,
+    /// Exclusive top-level block bound covered by this part.
+    pub end_block: usize,
+    /// Distinct embedded assets referenced below this range, in first-use order.
+    /// Assets with no inline reference are assigned to a trailing unowned part.
+    pub asset_ids: Vec<AssetId>,
+}
+
+/// Complete Markdown together with its ordered source-provenance parts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedDocument {
+    /// Complete Markdown, including source-unit markers and note definitions.
+    pub markdown: String,
+    /// Ordered source-unit and unowned block ranges.
+    pub parts: Vec<RenderedPart>,
+}
+
 pub fn document_to_markdown(doc: &Document) -> String {
     let rc = Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc) };
-    let mut parts = Vec::new();
+    render_document_markdown(doc, &rc)
+}
+
+/// Render a parsed document and expose the source and asset provenance of each
+/// ordered part without parsing it a second time.
+pub fn render_document(doc: &Document) -> RenderedDocument {
+    let rc = Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc) };
+    RenderedDocument {
+        markdown: render_document_markdown(doc, &rc),
+        parts: render_document_parts(doc, &rc),
+    }
+}
+
+fn valid_source_units(doc: &Document) -> Vec<(usize, &crate::model::SourceUnit)> {
     let mut units = Vec::new();
     let mut prior_end = 0;
-    for unit in &doc.source_units {
+    for (index, unit) in doc.source_units.iter().enumerate() {
         if unit.start_block <= unit.end_block
             && unit.end_block <= doc.blocks.len()
             && unit.start_block >= prior_end
         {
             prior_end = unit.end_block;
-            units.push(unit);
+            units.push((index, unit));
         }
     }
+    units
+}
+
+fn render_document_markdown(doc: &Document, rc: &Ctx) -> String {
+    let mut parts = Vec::new();
+    let units = valid_source_units(doc);
     for block_index in 0..=doc.blocks.len() {
         for unit in units
             .iter()
+            .map(|(_, unit)| *unit)
             .filter(|unit| unit.start_block < unit.end_block && unit.end_block == block_index)
             .rev()
         {
             parts.push(render_source_unit(unit, false));
         }
-        for unit in units.iter().filter(|unit| unit.start_block == block_index) {
+        for unit in
+            units.iter().map(|(_, unit)| *unit).filter(|unit| unit.start_block == block_index)
+        {
             parts.push(render_source_unit(unit, true));
             if unit.start_block == unit.end_block {
                 parts.push(render_source_unit(unit, false));
             }
         }
         if let Some(block) = doc.blocks.get(block_index)
-            && let Some(rendered) = render_block(block, &rc)
+            && let Some(rendered) = render_block(block, rc)
         {
             parts.push(rendered);
         }
     }
+    parts.extend(render_note_definitions(doc, rc));
+    finish_markdown(parts.join("\n\n"))
+}
+
+fn render_note_definitions(doc: &Document, rc: &Ctx) -> Vec<String> {
+    let mut parts = Vec::new();
     let mut rendered_defs: HashSet<usize> = HashSet::new();
     let mut ordered: Vec<(&Note, usize)> =
         doc.notes.iter().filter_map(|n| rc.nums.get(&n.id).map(|&num| (n, num))).collect();
@@ -81,7 +136,7 @@ pub fn document_to_markdown(doc: &Document) -> String {
             log::debug!("duplicate note id {:?} dropped from output", note.id);
             continue;
         }
-        let body = render_blocks(&note.blocks, &rc);
+        let body = render_blocks(&note.blocks, rc);
         if body.is_empty() {
             continue;
         }
@@ -97,11 +152,188 @@ pub fn document_to_markdown(doc: &Document) -> String {
         }
         parts.push(s);
     }
-    let mut out = parts.join("\n\n");
+    parts
+}
+
+fn finish_markdown(mut out: String) -> String {
     if !out.is_empty() {
         out.push('\n');
     }
     out
+}
+
+fn render_document_parts(doc: &Document, rc: &Ctx) -> Vec<RenderedPart> {
+    let units = valid_source_units(doc);
+    let mut parts = Vec::new();
+    let mut referenced_assets = HashSet::new();
+    let mut cursor = 0;
+
+    if units.is_empty() {
+        parts.push(render_part(doc, rc, None, 0, doc.blocks.len(), &mut referenced_assets));
+    } else {
+        for (source_unit_index, unit) in units {
+            if cursor < unit.start_block {
+                parts.push(render_part(
+                    doc,
+                    rc,
+                    None,
+                    cursor,
+                    unit.start_block,
+                    &mut referenced_assets,
+                ));
+            }
+            parts.push(render_part(
+                doc,
+                rc,
+                Some(source_unit_index),
+                unit.start_block,
+                unit.end_block,
+                &mut referenced_assets,
+            ));
+            cursor = unit.end_block;
+        }
+        if cursor < doc.blocks.len() {
+            parts.push(render_part(
+                doc,
+                rc,
+                None,
+                cursor,
+                doc.blocks.len(),
+                &mut referenced_assets,
+            ));
+        }
+    }
+
+    let note_markdown = render_note_definitions(doc, rc).join("\n\n");
+    let note_asset_ids = collect_asset_ids_from_notes(doc, &mut referenced_assets);
+    let unreferenced_asset_ids: Vec<AssetId> = doc
+        .assets
+        .iter()
+        .map(|asset| asset.id)
+        .filter(|id| !referenced_assets.contains(id))
+        .collect();
+
+    if !note_markdown.is_empty() || !note_asset_ids.is_empty() || !unreferenced_asset_ids.is_empty()
+    {
+        let part = trailing_unowned_part(&mut parts, doc.blocks.len());
+        if !note_markdown.is_empty() {
+            if !part.markdown.is_empty() {
+                part.markdown.push_str("\n\n");
+            }
+            part.markdown.push_str(&note_markdown);
+        }
+        for id in note_asset_ids.into_iter().chain(unreferenced_asset_ids) {
+            if !part.asset_ids.contains(&id) {
+                part.asset_ids.push(id);
+            }
+        }
+    }
+
+    for part in &mut parts {
+        part.markdown = finish_markdown(std::mem::take(&mut part.markdown));
+    }
+    parts
+}
+
+fn render_part(
+    doc: &Document,
+    rc: &Ctx,
+    source_unit_index: Option<usize>,
+    start_block: usize,
+    end_block: usize,
+    referenced_assets: &mut HashSet<AssetId>,
+) -> RenderedPart {
+    let blocks = &doc.blocks[start_block..end_block];
+    let asset_ids = collect_asset_ids(blocks, referenced_assets);
+    RenderedPart {
+        markdown: render_blocks(blocks, rc),
+        source_unit_index,
+        start_block,
+        end_block,
+        asset_ids,
+    }
+}
+
+fn trailing_unowned_part(parts: &mut Vec<RenderedPart>, block_count: usize) -> &mut RenderedPart {
+    let has_trailing_unowned = parts
+        .last()
+        .is_some_and(|part| part.source_unit_index.is_none() && part.end_block == block_count);
+    if !has_trailing_unowned {
+        parts.push(RenderedPart {
+            markdown: String::new(),
+            source_unit_index: None,
+            start_block: block_count,
+            end_block: block_count,
+            asset_ids: Vec::new(),
+        });
+    }
+    parts.last_mut().expect("a trailing part was retained or inserted")
+}
+
+fn collect_asset_ids(blocks: &[Block], all_seen: &mut HashSet<AssetId>) -> Vec<AssetId> {
+    let mut part_seen = HashSet::new();
+    let mut ids = Vec::new();
+    walk_asset_ids(blocks, &mut |id| {
+        all_seen.insert(id);
+        if part_seen.insert(id) {
+            ids.push(id);
+        }
+    });
+    ids
+}
+
+fn collect_asset_ids_from_notes(doc: &Document, all_seen: &mut HashSet<AssetId>) -> Vec<AssetId> {
+    let mut note_seen = HashSet::new();
+    let mut ids = Vec::new();
+    for note in &doc.notes {
+        walk_asset_ids(&note.blocks, &mut |id| {
+            all_seen.insert(id);
+            if note_seen.insert(id) {
+                ids.push(id);
+            }
+        });
+    }
+    ids
+}
+
+fn walk_asset_ids(blocks: &[Block], found: &mut impl FnMut(AssetId)) {
+    fn walk_inlines(inlines: &[Inline], found: &mut impl FnMut(AssetId)) {
+        for inline in inlines {
+            match inline {
+                Inline::Link { content, .. } => walk_inlines(content, found),
+                Inline::Image { source: crate::model::ImageSource::Asset(id), .. } => found(*id),
+                Inline::Text { .. }
+                | Inline::Image { .. }
+                | Inline::Anchor(_)
+                | Inline::NoteRef(_)
+                | Inline::LineBreak => {}
+            }
+        }
+    }
+
+    for block in blocks {
+        match block {
+            Block::Heading { content, .. } | Block::Paragraph(content) => {
+                walk_inlines(content, found)
+            }
+            Block::List(list) => {
+                for item in &list.items {
+                    walk_asset_ids(&item.blocks, found);
+                }
+            }
+            Block::Table(table) => {
+                for row in &table.grid {
+                    for slot in row {
+                        if let crate::model::CellSlot::Origin(cell) = slot {
+                            walk_asset_ids(&cell.blocks, found);
+                        }
+                    }
+                }
+            }
+            Block::BlockQuote(blocks) => walk_asset_ids(blocks, found),
+            Block::CodeBlock { .. } | Block::Rule => {}
+        }
+    }
 }
 
 fn render_source_unit(unit: &crate::model::SourceUnit, start: bool) -> String {
