@@ -1,15 +1,15 @@
-name: Publish Nebula Python wheels
+name: Release zeroset-anydoc
 
 on:
   push:
-    tags: ['nebula-v*']
+    tags: ['zeroset-v*']
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: publish-nebula-python-${{ github.ref }}
+  group: release-zeroset-anydoc-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -24,9 +24,9 @@ jobs:
         name: Verify package version
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then
-            version=$(sh scripts/check-nebula-python-version.sh "$GITHUB_REF_NAME")
+            version=$(sh scripts/check-zeroset-python-version.sh "$GITHUB_REF_NAME")
           else
-            version=$(sh scripts/check-nebula-python-version.sh)
+            version=$(sh scripts/check-zeroset-python-version.sh)
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
@@ -69,7 +69,7 @@ jobs:
           args: --release --locked --manifest-path python/Cargo.toml --out dist
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: nebula-wheels-${{ matrix.target }}
+          name: zeroset-anydoc-wheels-${{ matrix.target }}
           path: dist/*.whl
           if-no-files-found: error
 
@@ -108,7 +108,7 @@ jobs:
           python-version: '3.13'
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: nebula-wheels-${{ matrix.target }}
+          name: zeroset-anydoc-wheels-${{ matrix.target }}
           path: dist
       - name: Install wheel and run tests
         if: ${{ !matrix.image && !matrix.macos_x64 }}
@@ -140,7 +140,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: nebula-wheels-*
+          pattern: zeroset-anydoc-wheels-*
           path: dist
           merge-multiple: true
       - name: Publish wheels
