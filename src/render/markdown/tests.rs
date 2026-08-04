@@ -1,11 +1,16 @@
 use super::document_to_markdown;
 use crate::model::{
     AnchorId, Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget, List, ListItem,
-    MarkerKind, Note, NoteKind, Style, Table, TableKind,
+    MarkerKind, Note, NoteKind, SourceUnit, SourceUnitKind, Style, Table, TableKind,
 };
 
 fn doc(blocks: Vec<Block>) -> String {
-    document_to_markdown(&Document { blocks, notes: Vec::new(), assets: Vec::new() })
+    document_to_markdown(&Document {
+        blocks,
+        source_units: Vec::new(),
+        notes: Vec::new(),
+        assets: Vec::new(),
+    })
 }
 
 fn styled(text: &str, style: Style) -> Inline {
@@ -27,6 +32,133 @@ const ITALIC: Style = Style { bold: false, italic: true, strike: false, code: fa
 fn heading_and_paragraph() {
     let md = doc(vec![heading(2, "Title"), Block::Paragraph(vec![Inline::plain("Hello world.")])]);
     assert_eq!(md, "## Title\n\nHello world.\n");
+}
+
+#[test]
+fn source_units_render_at_boundaries_including_empty_units() {
+    let md = document_to_markdown(&Document {
+        blocks: vec![Block::Paragraph(vec![Inline::plain("Second slide")])],
+        source_units: vec![
+            SourceUnit {
+                kind: SourceUnitKind::Slide,
+                ordinal: 1,
+                name: None,
+                status: crate::model::SourceUnitStatus::Empty,
+                reason: None,
+                start_block: 0,
+                end_block: 0,
+            },
+            SourceUnit {
+                kind: SourceUnitKind::Slide,
+                ordinal: 2,
+                name: None,
+                status: crate::model::SourceUnitStatus::Parsed,
+                reason: None,
+                start_block: 0,
+                end_block: 1,
+            },
+        ],
+        notes: Vec::new(),
+        assets: Vec::new(),
+    });
+    assert_eq!(
+        md,
+        "<!-- anydoc:source-unit-start kind=slide ordinal=1 status=empty -->\n\n\
+         <!-- anydoc:source-unit-end kind=slide ordinal=1 status=empty -->\n\n\
+         <!-- anydoc:source-unit-start kind=slide ordinal=2 status=parsed -->\n\nSecond slide\n\n\
+         <!-- anydoc:source-unit-end kind=slide ordinal=2 status=parsed -->\n"
+    );
+}
+
+#[test]
+fn source_unit_names_cannot_escape_the_marker() {
+    let md = document_to_markdown(&Document {
+        blocks: Vec::new(),
+        source_units: vec![SourceUnit {
+            kind: SourceUnitKind::Sheet,
+            ordinal: 1,
+            name: Some("Q1 --> résumé".into()),
+            status: crate::model::SourceUnitStatus::Empty,
+            reason: None,
+            start_block: 0,
+            end_block: 0,
+        }],
+        notes: Vec::new(),
+        assets: Vec::new(),
+    });
+    assert_eq!(
+        md,
+        "<!-- anydoc:source-unit-start kind=sheet ordinal=1 status=empty name=Q1%20%2D%2D%3E%20r%C3%A9sum%C3%A9 -->\n\n\
+         <!-- anydoc:source-unit-end kind=sheet ordinal=1 status=empty -->\n"
+    );
+}
+
+#[test]
+fn skipped_source_unit_reason_is_structured_and_escaped() {
+    let md = document_to_markdown(&Document {
+        blocks: Vec::new(),
+        source_units: vec![SourceUnit {
+            kind: SourceUnitKind::Slide,
+            ordinal: 3,
+            name: None,
+            status: crate::model::SourceUnitStatus::Skipped,
+            reason: Some("missing --> part".into()),
+            start_block: 0,
+            end_block: 0,
+        }],
+        notes: Vec::new(),
+        assets: Vec::new(),
+    });
+    assert_eq!(
+        md,
+        "<!-- anydoc:source-unit-start kind=slide ordinal=3 status=skipped reason=missing%20%2D%2D%3E%20part -->\n\n\
+         <!-- anydoc:source-unit-end kind=slide ordinal=3 status=skipped -->\n"
+    );
+}
+
+#[test]
+fn invalid_source_unit_offsets_do_not_panic_rendering() {
+    let md = document_to_markdown(&Document {
+        blocks: vec![Block::Paragraph(vec![Inline::plain("Body")])],
+        source_units: vec![SourceUnit {
+            kind: SourceUnitKind::Slide,
+            ordinal: 1,
+            name: None,
+            status: crate::model::SourceUnitStatus::Parsed,
+            reason: None,
+            start_block: usize::MAX,
+            end_block: 0,
+        }],
+        notes: Vec::new(),
+        assets: Vec::new(),
+    });
+    assert_eq!(md, "Body\n");
+}
+
+#[test]
+fn source_unit_end_does_not_claim_trailing_unscoped_blocks() {
+    let md = document_to_markdown(&Document {
+        blocks: vec![
+            Block::Paragraph(vec![Inline::plain("Sheet body")]),
+            Block::Paragraph(vec![Inline::plain("Unpositioned workbook image")]),
+        ],
+        source_units: vec![SourceUnit {
+            kind: SourceUnitKind::Sheet,
+            ordinal: 1,
+            name: Some("Data".into()),
+            status: crate::model::SourceUnitStatus::Parsed,
+            reason: None,
+            start_block: 0,
+            end_block: 1,
+        }],
+        notes: Vec::new(),
+        assets: Vec::new(),
+    });
+    assert_eq!(
+        md,
+        "<!-- anydoc:source-unit-start kind=sheet ordinal=1 status=parsed name=Data -->\n\nSheet body\n\n\
+         <!-- anydoc:source-unit-end kind=sheet ordinal=1 status=parsed -->\n\nUnpositioned workbook image\n"
+    );
 }
 
 #[test]
@@ -382,6 +514,7 @@ fn footnotes() {
             Inline::plain(" More."),
             Inline::NoteRef("a".into()),
         ])],
+        source_units: Vec::new(),
         notes: vec![
             note("a", vec![Block::Paragraph(vec![Inline::plain("Second note.")])]),
             note(
@@ -407,6 +540,7 @@ fn empty_and_unreferenced_notes() {
             Inline::plain("Text"),
             Inline::NoteRef("empty".into()),
         ])],
+        source_units: Vec::new(),
         notes: vec![
             note("empty", vec![Block::Paragraph(vec![])]),
             note("orphan", vec![Block::Paragraph(vec![Inline::plain("Kept.")])]),
@@ -420,6 +554,7 @@ fn empty_and_unreferenced_notes() {
 fn duplicate_note_ids_render_one_definition() {
     let md = document_to_markdown(&Document {
         blocks: vec![Block::Paragraph(vec![Inline::plain("Text"), Inline::NoteRef("a".into())])],
+        source_units: Vec::new(),
         notes: vec![
             note("a", vec![Block::Paragraph(vec![Inline::plain("First wins.")])]),
             note("a", vec![Block::Paragraph(vec![Inline::plain("Duplicate dropped.")])]),

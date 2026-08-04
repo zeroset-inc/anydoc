@@ -10,6 +10,7 @@ FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
 OUTLINE = FIXTURES / "docx" / "handmade-outline.docx"
 RICH = FIXTURES / "docx" / "handmade-rich.docx"
 CSV = FIXTURES / "csv" / "sheet.csv"
+PRESENTATION = FIXTURES / "pptx" / "pres.pptx"
 
 
 class AnydocTest(unittest.TestCase):
@@ -43,6 +44,18 @@ class AnydocTest(unittest.TestCase):
         self.assertIsInstance(image.data, bytes)
         self.assertGreater(len(image.data), 0)
         self.assertEqual(image.id, document.assets.index(image))
+
+    def test_to_document_exposes_source_units(self):
+        document = anydoc.to_document(PRESENTATION.read_bytes(), "pptx")
+        self.assertEqual(len(document.source_units), 2)
+        first = document.source_units[0]
+        self.assertEqual(first.kind, "slide")
+        self.assertEqual(first.ordinal, 1)
+        self.assertIsNone(first.name)
+        self.assertEqual(first.status, "parsed")
+        self.assertIsNone(first.reason)
+        self.assertEqual(first.start_block, 0)
+        self.assertGreater(first.end_block, first.start_block)
 
     def test_format_detection_reads_content_extension_and_path(self):
         self.assertEqual(anydoc.format_from_bytes(RICH.read_bytes()), "docx")

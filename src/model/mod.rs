@@ -10,6 +10,7 @@ mod block;
 mod inline;
 mod link;
 mod list;
+mod source;
 mod style;
 mod table;
 
@@ -18,6 +19,7 @@ pub use block::Block;
 pub use inline::{Inline, inlines_are_empty, inlines_to_plain_text};
 pub use link::{AnchorId, ImageSource, LinkTarget};
 pub use list::{List, ListItem, MarkerKind};
+pub use source::{SourceUnit, SourceUnitKind, SourceUnitStatus};
 pub use style::Style;
 pub use table::{Cell, CellSlot, Table, TableKind};
 
@@ -30,6 +32,10 @@ pub(crate) use table::GridBuilder;
 pub struct Document {
     /// Body content in reading order.
     pub blocks: Vec<Block>,
+    /// Source-defined units mapped to half-open ranges in [`Self::blocks`].
+    /// Empty units have equal start and end offsets. Ranges need not cover
+    /// every block: content without honest unit provenance remains unowned.
+    pub source_units: Vec<SourceUnit>,
     /// Note bodies, in the order the document defines them. Text refers to
     /// them by id through [`Inline::NoteRef`].
     pub notes: Vec<Note>,

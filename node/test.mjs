@@ -8,6 +8,8 @@ import {
   formatFromBytes,
   formatFromExtension,
   formatFromPath,
+  SourceUnitKind,
+  SourceUnitStatus,
   toDocument,
   toMarkdown,
   toMarkdownBytes,
@@ -18,6 +20,7 @@ const fixture = (name) => fileURLToPath(new URL(`../tests/fixtures/${name}`, imp
 const OUTLINE = fixture('docx/handmade-outline.docx')
 const RICH = fixture('docx/handmade-rich.docx')
 const CSV = fixture('csv/sheet.csv')
+const PRESENTATION = fixture('pptx/pres.pptx')
 
 test('toMarkdown detects the format from the file content', async () => {
   const markdown = await toMarkdown(OUTLINE)
@@ -52,6 +55,17 @@ test('toDocument carries embedded assets as buffers', async () => {
   assert.ok(Buffer.isBuffer(image.data))
   assert.ok(image.data.length > 0)
   assert.equal(image.id, document.assets.indexOf(image))
+})
+
+test('toDocument exposes source units', async () => {
+  const document = await toDocument(await readFile(PRESENTATION), 'pptx')
+  assert.equal(document.sourceUnits.length, 2)
+  const first = document.sourceUnits[0]
+  assert.equal(first.kind, SourceUnitKind.slide)
+  assert.equal(first.ordinal, 1)
+  assert.equal(first.status, SourceUnitStatus.parsed)
+  assert.equal(first.startBlock, 0)
+  assert.ok(first.endBlock > first.startBlock)
 })
 
 test('format detection reads content, extension, and path', async () => {

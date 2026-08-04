@@ -46,10 +46,26 @@ def to_document(data: bytes | bytearray, format: Format | None = None) -> Docume
 @final
 class Document:
     blocks: list[Block]
+    source_units: list[SourceUnit]
+    """Source-defined units mapped to half-open ranges in `blocks`."""
     notes: list[Note]
     """Footnote and endnote bodies, referenced from text by a `note_ref`
     inline."""
     assets: list[Asset]
+
+@final
+class SourceUnit:
+    """A source-defined unit mapped to a half-open range of top-level blocks."""
+
+    kind: Literal["slide", "sheet"]
+    ordinal: int
+    """1-based source position."""
+    name: str | None
+    status: Literal["parsed", "empty", "skipped"]
+    reason: str | None
+    """Stable machine-readable explanation when skipped."""
+    start_block: int
+    end_block: int
 
 @final
 class Block:

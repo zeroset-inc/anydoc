@@ -2,6 +2,8 @@
 source: tests/snapshots.rs
 expression: output
 ---
+<!-- anydoc:source-unit-start kind=slide ordinal=1 status=parsed -->
+
 Deck Title Slide
 
 - Top level point
@@ -11,6 +13,10 @@ Deck Title Slide
 - Second point with emphasis
 
 > Speaker note for the intro slide.
+
+<!-- anydoc:source-unit-end kind=slide ordinal=1 status=parsed -->
+
+<!-- anydoc:source-unit-start kind=slide ordinal=2 status=parsed -->
 
 Numbers Slide
 
@@ -24,3 +30,5 @@ Grouped shapes below.
 Inside a group shape.
 
 > Second slide notes mention the table.
+
+<!-- anydoc:source-unit-end kind=slide ordinal=2 status=parsed -->

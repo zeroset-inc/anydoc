@@ -39,7 +39,38 @@ pub(crate) struct Ctx {
 
 pub fn document_to_markdown(doc: &Document) -> String {
     let rc = Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc) };
-    let mut parts: Vec<String> = doc.blocks.iter().filter_map(|b| render_block(b, &rc)).collect();
+    let mut parts = Vec::new();
+    let mut units = Vec::new();
+    let mut prior_end = 0;
+    for unit in &doc.source_units {
+        if unit.start_block <= unit.end_block
+            && unit.end_block <= doc.blocks.len()
+            && unit.start_block >= prior_end
+        {
+            prior_end = unit.end_block;
+            units.push(unit);
+        }
+    }
+    for block_index in 0..=doc.blocks.len() {
+        for unit in units
+            .iter()
+            .filter(|unit| unit.start_block < unit.end_block && unit.end_block == block_index)
+            .rev()
+        {
+            parts.push(render_source_unit(unit, false));
+        }
+        for unit in units.iter().filter(|unit| unit.start_block == block_index) {
+            parts.push(render_source_unit(unit, true));
+            if unit.start_block == unit.end_block {
+                parts.push(render_source_unit(unit, false));
+            }
+        }
+        if let Some(block) = doc.blocks.get(block_index)
+            && let Some(rendered) = render_block(block, &rc)
+        {
+            parts.push(rendered);
+        }
+    }
     let mut rendered_defs: HashSet<usize> = HashSet::new();
     let mut ordered: Vec<(&Note, usize)> =
         doc.notes.iter().filter_map(|n| rc.nums.get(&n.id).map(|&num| (n, num))).collect();
@@ -71,6 +102,52 @@ pub fn document_to_markdown(doc: &Document) -> String {
         out.push('\n');
     }
     out
+}
+
+fn render_source_unit(unit: &crate::model::SourceUnit, start: bool) -> String {
+    let kind = match unit.kind {
+        crate::model::SourceUnitKind::Slide => "slide",
+        crate::model::SourceUnitKind::Sheet => "sheet",
+    };
+    let boundary = if start { "start" } else { "end" };
+    let status = match unit.status {
+        crate::model::SourceUnitStatus::Parsed => "parsed",
+        crate::model::SourceUnitStatus::Empty => "empty",
+        crate::model::SourceUnitStatus::Skipped => "skipped",
+    };
+    let mut marker = format!(
+        "<!-- anydoc:source-unit-{boundary} kind={kind} ordinal={} status={status} ",
+        unit.ordinal
+    );
+    if start && let Some(name) = &unit.name {
+        marker.push_str("name=");
+        marker.push_str(&percent_encode(name));
+        marker.push(' ');
+    }
+    if start && let Some(reason) = &unit.reason {
+        marker.push_str("reason=");
+        marker.push_str(&percent_encode(reason));
+        marker.push(' ');
+    }
+    marker.push_str("-->");
+    marker
+}
+
+/// Percent-encode source names so untrusted text cannot close the HTML
+/// comment or introduce ambiguous whitespace-delimited fields.
+fn percent_encode(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    encoded
 }
 
 /// Number notes in first-reference order; unreferenced notes follow at the

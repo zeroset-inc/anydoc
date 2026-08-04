@@ -14,11 +14,49 @@ use anydoc::model;
 pub struct Document {
     /// list[Block]
     blocks: Py<PyList>,
+    /// Source-defined units mapped to ranges in `blocks`. list[SourceUnit]
+    source_units: Py<PyList>,
     /// Footnote and endnote bodies, referenced from text by a `note_ref`
     /// inline. list[Note]
     notes: Py<PyList>,
     /// list[Asset]
     assets: Py<PyList>,
+}
+
+/// A source-defined unit mapped to a half-open range of top-level blocks.
+#[pyclass(frozen, get_all, module = "anydoc")]
+pub struct SourceUnit {
+    /// slide or sheet.
+    kind: &'static str,
+    /// 1-based source position.
+    ordinal: usize,
+    /// Source-defined name, when present.
+    name: Option<String>,
+    /// parsed, empty, or skipped.
+    status: &'static str,
+    /// Stable machine-readable explanation when skipped.
+    reason: Option<String>,
+    start_block: usize,
+    end_block: usize,
+}
+
+fn source_unit(unit: model::SourceUnit) -> SourceUnit {
+    SourceUnit {
+        kind: match unit.kind {
+            model::SourceUnitKind::Slide => "slide",
+            model::SourceUnitKind::Sheet => "sheet",
+        },
+        ordinal: unit.ordinal,
+        name: unit.name,
+        status: match unit.status {
+            model::SourceUnitStatus::Parsed => "parsed",
+            model::SourceUnitStatus::Empty => "empty",
+            model::SourceUnitStatus::Skipped => "skipped",
+        },
+        reason: unit.reason,
+        start_block: unit.start_block,
+        end_block: unit.end_block,
+    }
 }
 
 #[pyclass(frozen, get_all, module = "anydoc")]
@@ -370,6 +408,10 @@ fn asset(py: Python<'_>, asset: model::Asset) -> PyResult<Asset> {
 pub fn document(py: Python<'_>, document: model::Document) -> PyResult<Document> {
     Ok(Document {
         blocks: blocks(py, document.blocks)?,
+        source_units: pylist(
+            py,
+            document.source_units.into_iter().map(|unit| Ok(source_unit(unit))),
+        )?,
         notes: pylist(py, document.notes.into_iter().map(|n| note(py, n)))?,
         assets: pylist(py, document.assets.into_iter().map(|a| asset(py, a)))?,
     })

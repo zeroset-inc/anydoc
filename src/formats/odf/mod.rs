@@ -5,7 +5,9 @@ mod table;
 mod text;
 
 use crate::error::ConvertError;
-use crate::model::{Block, Document, Inline, inlines_are_empty};
+use crate::model::{
+    Block, Document, Inline, SourceUnit, SourceUnitKind, SourceUnitStatus, inlines_are_empty,
+};
 use crate::package::Package;
 use crate::package::xml::{Element, ns};
 use crate::shared::assets::AssetSink;
@@ -38,12 +40,17 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     let assets = RefCell::new(AssetSink::new());
     let ctx = Ctx::new(&styles, &pkg, &assets);
 
+    let mut source_units = Vec::new();
     let blocks = if let Some(text) = body.find(ns::OFFICE, "text") {
         parse_container(text, &ctx)?
     } else if let Some(sheet) = body.find(ns::OFFICE, "spreadsheet") {
-        table::parse_spreadsheet(sheet, &ctx)?
+        let (blocks, units) = table::parse_spreadsheet(sheet, &ctx)?;
+        source_units = units;
+        blocks
     } else if let Some(pres) = body.find(ns::OFFICE, "presentation") {
-        parse_presentation(pres, &ctx)?
+        let (blocks, units) = parse_presentation(pres, &ctx)?;
+        source_units = units;
+        blocks
     } else {
         return Err(ConvertError::malformed_part(
             "content.xml",
@@ -53,7 +60,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
 
     let notes = ctx.notes.into_inner();
     let assets = std::mem::take(&mut assets.borrow_mut().assets);
-    Ok(Document { blocks, notes, assets })
+    Ok(Document { blocks, source_units, notes, assets })
 }
 
 /// Encrypted ODF packages carry `manifest:encryption-data` elements on file
@@ -68,9 +75,14 @@ fn is_encrypted(pkg: &RefCell<Package>) -> Result<bool, ConvertError> {
     Ok(tree.first_descendant(ns::MANIFEST, "encryption-data").is_some())
 }
 
-fn parse_presentation(pres: &Element, ctx: &Ctx) -> Result<Vec<Block>, ConvertError> {
+fn parse_presentation(
+    pres: &Element,
+    ctx: &Ctx,
+) -> Result<(Vec<Block>, Vec<SourceUnit>), ConvertError> {
     let mut blocks = Vec::new();
-    for page in pres.find_all(ns::DRAW, "page") {
+    let mut source_units = Vec::new();
+    for (page_index, page) in pres.find_all(ns::DRAW, "page").enumerate() {
+        let start_block = blocks.len();
         let mut title = Vec::new();
         let mut body = Vec::new();
         let mut notes = Vec::new();
@@ -81,8 +93,21 @@ fn parse_presentation(pres: &Element, ctx: &Ctx) -> Result<Vec<Block>, ConvertEr
         if !notes.is_empty() {
             blocks.push(Block::BlockQuote(notes));
         }
+        source_units.push(SourceUnit {
+            kind: SourceUnitKind::Slide,
+            ordinal: page_index + 1,
+            name: page.attr(ns::DRAW, "name").map(str::to_string),
+            status: if start_block == blocks.len() {
+                SourceUnitStatus::Empty
+            } else {
+                SourceUnitStatus::Parsed
+            },
+            reason: None,
+            start_block,
+            end_block: blocks.len(),
+        });
     }
-    Ok(blocks)
+    Ok((blocks, source_units))
 }
 
 /// Walk a page's shapes in document order, recursing into `draw:g` groups.
