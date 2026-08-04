@@ -4,75 +4,33 @@
 [![npm](https://img.shields.io/npm/v/@firecrawl/anydoc.svg)](https://www.npmjs.com/package/@firecrawl/anydoc)
 [![PyPI](https://img.shields.io/pypi/v/firecrawl-anydoc.svg)](https://pypi.org/project/firecrawl-anydoc/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![skills.sh](https://skills.sh/b/firecrawl/anydoc)](https://skills.sh/firecrawl/anydoc)
 
 Fast Rust library that converts documents (Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and PDF) into clean GitHub-Flavored Markdown. Includes bindings for [Node.js](node/README.md) and [Python](python/README.md).
 
 Built by [Firecrawl](https://firecrawl.dev) to turn any office document into LLM-ready Markdown in single-digit milliseconds, with one consistent output no matter which format goes in. It powers [Firecrawl Parse](https://firecrawl.dev/parse), so if you'd rather not run it yourself, the hosted API gives you the same conversion plus our OCR models for the scanned pages anydoc can't read on its own.
 
-## Features
-
-- **One output for every format.** Each format parses into a shared document model and renders through a single Markdown serializer, so escaping, tables, heading anchors, and footnotes behave identically whether the input was a `.doc` from 2003 or a `.pptx` from yesterday.
-- **Full document structure.** Headings with anchors, bold/italic/strikethrough, inline code and code blocks, links and internal cross-references, bulleted/numbered/nested/task lists with the source's own numbering, tables with merged cells and header rows, block quotes, footnotes and endnotes, and speaker notes.
-- **Embedded assets.** Images and embedded objects render as their alt text in the Markdown, and the raw bytes stay available on the document model, tagged with their media type. Images with an external URL become ordinary Markdown images.
-- **Content-based format detection.** The format is read from the bytes themselves (PDF header, RTF open group, OLE stream names, ZIP package mimetype), so mislabeled files still convert correctly.
-- **Fast.** Pure Rust, no ML models, no external services. Median conversion time is under 5ms per document.
-- **Bindings that stay out of the way.** Node.js conversion runs on the libuv thread pool and never blocks the event loop; Python releases the GIL so other threads keep running. TypeScript types and Python stubs ship with the packages.
-- **PDF support built in.** Text-based PDFs convert locally through [pdf-inspector](https://github.com/firecrawl/pdf-inspector), no OCR service required.
-
-## Supported formats
-
-| Format           | Extensions                                                 |
-| ---------------- | ---------------------------------------------------------- |
-| Word             | `.doc`, `.docx`, `.docm`                                   |
-| PowerPoint       | `.ppt`, `.pps`, `.pot`, `.pptx`, `.pptm`, `.ppsx`, `.ppsm` |
-| Excel            | `.xls`, `.xlsx`, `.xlsm`, `.xlsb`                          |
-| OpenDocument     | `.odt`, `.ods`, `.odp`                                     |
-| Rich Text Format | `.rtf`                                                     |
-| EPUB             | `.epub`                                                    |
-| CSV              | `.csv`                                                     |
-| PDF              | `.pdf`                                                     |
-
-PDFs take a shortcut: [pdf-inspector](https://github.com/firecrawl/pdf-inspector) emits Markdown directly, so use `to_markdown` / `to_markdown_bytes` for them rather than `to_document`. Scanned and image-only PDFs need OCR, so anydoc returns an unsupported error for them; route those to [Firecrawl Parse](https://docs.firecrawl.dev/api-reference/endpoint/parse), which OCRs them and returns the same Markdown.
-
-## Benchmark
-
-anydoc is measured against six other converters on 100 real-world documents spanning fourteen formats. Scores run from 0 to 100, higher is better; speed is the median time to convert one document.
-
-| tool         | formats   | median ms | docs judged | score  | completeness | structure | formatting | cleanliness |
-| ------------ | --------- | --------- | ----------- | ------ | ------------ | --------- | ---------- | ----------- |
-| anydoc       | **14/14** | **4.7**   | 94          | **80** | **88**       | **78**    | **77**     | **79**      |
-| libreoffice  | 12/14     | 1129.5    | 87          | 40     | 59           | 43        | 43         | 24          |
-| unstructured | 8/14      | 572.9     | 58          | 65     | 76           | 62        | 52         | 67          |
-| markitdown   | 6/14      | 134.8     | 33          | 65     | 80           | 67        | 61         | 53          |
-| pandoc       | 5/14      | 102.1     | 34          | 57     | 75           | 57        | 58         | 39          |
-| docling      | 4/14      | 513.6     | 21          | 57     | 63           | 59        | 57         | 52          |
-| mammoth      | 1/14      | 52.5      | 8           | 70     | 85           | 68        | 74         | 55          |
-
-Per format, like for like:
-
-| format | anydoc | libreoffice | unstructured | markitdown | pandoc | docling | mammoth |
-| ------ | ------ | ----------- | ------------ | ---------- | ------ | ------- | ------- |
-| doc    | **88** | 58          | 68           | -          | -      | -       | -       |
-| docm   | **82** | 49          | -            | -          | -      | -       | -       |
-| docx   | **86** | 53          | 56           | 72         | 68     | 68      | 70      |
-| epub   | 74     | -           | 74           | **77**     | 53     | -       | -       |
-| odp    | **87** | 22          | -            | -          | -      | -       | -       |
-| ods    | **82** | 42          | -            | -          | -      | -       | -       |
-| odt    | **80** | 52          | 70           | -          | 61     | -       | -       |
-| ppt    | **80** | 25          | -            | -          | -      | -       | -       |
-| pptx   | **76** | 22          | -            | 59         | -      | 50      | -       |
-| rtf    | **89** | 58          | 48           | -          | 46     | -       | -       |
-| xls    | **77** | 40          | 68           | 64         | -      | -       | -       |
-| xlsm   | **70** | 30          | -            | -          | -      | -       | -       |
-| xlsx   | **70** | 31          | 69           | 55         | -      | 51      | -       |
-
-**How quality was scored:** an LLM judge (Claude Sonnet 5) compares two tools' outputs blind against ground truth: the document's first six pages, rendered to images by LibreOffice. Each output is scored on completeness, structure, formatting, and cleanliness. Every pair is judged twice with the outputs swapped to cancel position bias, for 479 verdicts in total. Each tool's `score` averages its per-format scores over the formats it supports, so a corpus heavy in one format can't skew it. It also means each row averages a different set of formats (mammoth's 70 is docx alone, while anydoc's 80 spans all fourteen), so the per-format table is the fair comparison.
-
-Speed is one warm conversion per document on a Ryzen 9 9950X3D (Windows 11, 64 GB DDR5-6400). anydoc and the Python libraries are timed with process spawn excluded; the CLI tools include it, since that is how they are used. The harness lives in [`bench/`](bench/README.md); the corpus is not redistributable and is not in the repo.
-
-**Best fit:** pipelines that receive a mixed bag of office documents and need one consistent, structured Markdown output. In this comparison, anydoc was the only tool to cover all fourteen formats, scored highest on every judged format except EPUB, and converted documents an order of magnitude faster than the next-fastest tool.
-
 ## Quick start
+
+### Agent skill
+
+anydoc ships as an [Agent Skill](https://agentskills.io), so your agent can read any document it runs into:
+
+```bash
+npx skills add firecrawl/anydoc
+```
+
+The [skill](skills/convert-documents-to-markdown/SKILL.md) teaches the agent to convert documents with the anydoc CLI. Works with [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex/), [Cursor](https://cursor.com), [OpenCode](https://opencode.ai), and any other [compatible agent](https://agentskills.io/clients).
+
+### CLI
+
+```bash
+npx @firecrawl/anydoc report.docx               # Markdown to stdout
+npx @firecrawl/anydoc slides.pptx -o slides.md  # or to a file
+npx @firecrawl/anydoc - --format csv < data.csv # read stdin
+```
+
+`npx` downloads the prebuilt binary for your platform on first run. For a permanent `anydoc` command, install globally with `npm install -g @firecrawl/anydoc`. Run `anydoc --help` for all options.
 
 ### Node.js
 
@@ -142,15 +100,67 @@ let markdown = anydoc::to_markdown_bytes(&bytes, anydoc::Format::Csv)?;
 let document = anydoc::to_document(&bytes, None)?;
 ```
 
-### CLI
+## Features
 
-A convert CLI ships in [`examples/`](examples/), in all three languages:
+- **One output for every format.** Each format parses into a shared document model and renders through a single Markdown serializer, so escaping, tables, heading anchors, and footnotes behave identically whether the input was a `.doc` from 2003 or a `.pptx` from yesterday.
+- **Full document structure.** Headings with anchors, bold/italic/strikethrough, inline code and code blocks, links and internal cross-references, bulleted/numbered/nested/task lists with the source's own numbering, tables with merged cells and header rows, block quotes, footnotes and endnotes, and speaker notes.
+- **Embedded assets.** Images and embedded objects render as their alt text in the Markdown, and the raw bytes stay available on the document model, tagged with their media type. Images with an external URL become ordinary Markdown images.
+- **Content-based format detection.** The format is read from the bytes themselves (PDF header, RTF open group, OLE stream names, ZIP package mimetype), so mislabeled files still convert correctly.
+- **Fast.** Pure Rust, no ML models, no external services. Median conversion time is under 5ms per document.
+- **Bindings that stay out of the way.** Node.js conversion runs on the libuv thread pool and never blocks the event loop; Python releases the GIL so other threads keep running. TypeScript types and Python stubs ship with the packages.
+- **PDF support built in.** Text-based PDFs convert locally through [pdf-inspector](https://github.com/firecrawl/pdf-inspector), no OCR service required.
+- **Agent ready.** Ships as an [Agent Skill](#agent-skill): one `npx skills add firecrawl/anydoc` and any agent can read office documents.
 
-```bash
-cargo run --release --example convert -- file.docx [-f csv] [-o out.md] [--assets dir]
-node examples/convert.mjs file.docx [-f csv] [-o out.md] [--assets dir]
-python examples/convert.py file.docx [-f csv] [-o out.md] [--assets dir]
-```
+## Supported formats
+
+| Format           | Extensions                                                 |
+| ---------------- | ---------------------------------------------------------- |
+| Word             | `.doc`, `.docx`, `.docm`                                   |
+| PowerPoint       | `.ppt`, `.pps`, `.pot`, `.pptx`, `.pptm`, `.ppsx`, `.ppsm` |
+| Excel            | `.xls`, `.xlsx`, `.xlsm`, `.xlsb`                          |
+| OpenDocument     | `.odt`, `.ods`, `.odp`                                     |
+| Rich Text Format | `.rtf`                                                     |
+| EPUB             | `.epub`                                                    |
+| CSV              | `.csv`                                                     |
+| PDF              | `.pdf`                                                     |
+
+## Benchmark
+
+anydoc is measured against six other converters on 100 real-world documents spanning fourteen formats. Scores run from 0 to 100, higher is better; speed is the median time to convert one document.
+
+| tool         | formats   | median ms | docs judged | score  | completeness | structure | formatting | cleanliness |
+| ------------ | --------- | --------- | ----------- | ------ | ------------ | --------- | ---------- | ----------- |
+| anydoc       | **14/14** | **4.7**   | 94          | **80** | **88**       | **78**    | **77**     | **79**      |
+| libreoffice  | 12/14     | 1129.5    | 87          | 40     | 59           | 43        | 43         | 24          |
+| unstructured | 8/14      | 572.9     | 58          | 65     | 76           | 62        | 52         | 67          |
+| markitdown   | 6/14      | 134.8     | 33          | 65     | 80           | 67        | 61         | 53          |
+| pandoc       | 5/14      | 102.1     | 34          | 57     | 75           | 57        | 58         | 39          |
+| docling      | 4/14      | 513.6     | 21          | 57     | 63           | 59        | 57         | 52          |
+| mammoth      | 1/14      | 52.5      | 8           | 70     | 85           | 68        | 74         | 55          |
+
+Per format, like for like:
+
+| format | anydoc | libreoffice | unstructured | markitdown | pandoc | docling | mammoth |
+| ------ | ------ | ----------- | ------------ | ---------- | ------ | ------- | ------- |
+| doc    | **88** | 58          | 68           | -          | -      | -       | -       |
+| docm   | **82** | 49          | -            | -          | -      | -       | -       |
+| docx   | **86** | 53          | 56           | 72         | 68     | 68      | 70      |
+| epub   | 74     | -           | 74           | **77**     | 53     | -       | -       |
+| odp    | **87** | 22          | -            | -          | -      | -       | -       |
+| ods    | **82** | 42          | -            | -          | -      | -       | -       |
+| odt    | **80** | 52          | 70           | -          | 61     | -       | -       |
+| ppt    | **80** | 25          | -            | -          | -      | -       | -       |
+| pptx   | **76** | 22          | -            | 59         | -      | 50      | -       |
+| rtf    | **89** | 58          | 48           | -          | 46     | -       | -       |
+| xls    | **77** | 40          | 68           | 64         | -      | -       | -       |
+| xlsm   | **70** | 30          | -            | -          | -      | -       | -       |
+| xlsx   | **70** | 31          | 69           | 55         | -      | 51      | -       |
+
+**How quality was scored:** an LLM judge (Claude Sonnet 5) compares two tools' outputs blind against ground truth: the document's first six pages, rendered to images by LibreOffice. Each output is scored on completeness, structure, formatting, and cleanliness. Every pair is judged twice with the outputs swapped to cancel position bias, for 479 verdicts in total. Each tool's `score` averages its per-format scores over the formats it supports, so a corpus heavy in one format can't skew it. It also means each row averages a different set of formats (mammoth's 70 is docx alone, while anydoc's 80 spans all fourteen), so the per-format table is the fair comparison.
+
+Speed is one warm conversion per document on a Ryzen 9 9950X3D (Windows 11, 64 GB DDR5-6400). anydoc and the Python libraries are timed with process spawn excluded; the CLI tools include it, since that is how they are used. The harness lives in [`bench/`](bench/README.md); the corpus is not redistributable and is not in the repo.
+
+**Best fit:** pipelines that receive a mixed bag of office documents and need one consistent, structured Markdown output. In this comparison, anydoc was the only tool to cover all fourteen formats, scored highest on every judged format except EPUB, and converted documents an order of magnitude faster than the next-fastest tool.
 
 ## Format detection
 

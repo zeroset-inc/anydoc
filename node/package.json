@@ -1,6 +1,6 @@
 {
   "name": "@firecrawl/anydoc",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Convert documents (doc, docx, odt, rtf, epub, pdf, presentations, spreadsheets, csv) to GitHub-Flavored Markdown",
   "license": "MIT",
   "homepage": "https://github.com/firecrawl/anydoc#readme",
@@ -24,9 +24,13 @@
   ],
   "main": "index.js",
   "types": "index.d.ts",
+  "bin": {
+    "anydoc": "cli.js"
+  },
   "files": [
     "index.js",
     "index.d.ts",
+    "cli.js",
     "README.md"
   ],
   "engines": {
