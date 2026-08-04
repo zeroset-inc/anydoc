@@ -44,8 +44,6 @@ The [skill](skills/convert-documents-to-markdown/SKILL.md) teaches the agent to 
 | CSV              | `.csv`                                                     |
 | PDF              | `.pdf`                                                     |
 
-PDFs take a shortcut: [pdf-inspector](https://github.com/firecrawl/pdf-inspector) emits Markdown directly, so use `to_markdown` / `to_markdown_bytes` for them rather than `to_document`. Scanned and image-only PDFs need OCR, so anydoc returns an unsupported error for them; route those to [Firecrawl Parse](https://docs.firecrawl.dev/api-reference/endpoint/parse), which OCRs them and returns the same Markdown.
-
 ## Benchmark
 
 anydoc is measured against six other converters on 100 real-world documents spanning fourteen formats. Scores run from 0 to 100, higher is better; speed is the median time to convert one document.
