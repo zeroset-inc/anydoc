@@ -18,8 +18,8 @@ if [ -z "$rust_version" ] || [ "$python_version" != "$rust_version" ]; then
   exit 1
 fi
 
-if [ "$#" -gt 0 ] && [ "$1" != "nebula-v$rust_version" ]; then
-  printf 'error: tag %s does not match version %s (expected nebula-v%s)\n' \
+if [ "$#" -gt 0 ] && [ "$1" != "zeroset-v$rust_version" ]; then
+  printf 'error: tag %s does not match version %s (expected zeroset-v%s)\n' \
     "$1" "$rust_version" "$rust_version" >&2
   exit 1
 fi
