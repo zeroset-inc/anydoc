@@ -56,7 +56,9 @@ anydoc.format_from_path("report.odt")  # 'odt'
 
 ## Images and embedded objects
 
-Markdown cannot embed bytes, so an embedded image renders as its alt text while the bytes stay on `document.assets`, tagged with a media type and the part they came from. Images that carry an external URL render as ordinary Markdown images.
+Markdown cannot embed bytes, so an embedded image renders as its alt text while the bytes stay on `document.assets`, tagged with a media type and the part they came from. Images that carry an external URL render as ordinary Markdown images. Standard XLSX/XLSM DrawingML images retain their sheet and bounded cell placement.
+
+Presentation slides and spreadsheet sheets are exposed through `document.source_units`. Each unit carries its 1-based ordinal, optional source name, extraction status, and a half-open range into `document.blocks`; empty and skipped units are retained.
 
 Full behavior notes and benchmarks live in the [repository README](https://github.com/firecrawl/anydoc#readme).
 

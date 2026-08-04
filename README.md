@@ -174,6 +174,12 @@ Format::from_path(Path::new("report.odt")); // Some(Format::Odt)
 
 The same three functions exist in Node (`formatFromBytes`, ...) and Python (`anydoc.format_from_bytes`, ...).
 
+## Source provenance
+
+`to_document` preserves presentation slides and spreadsheet sheets in `document.source_units` (`sourceUnits` in Node). Each unit carries its 1-based ordinal, optional source name, extraction status, and a half-open range into the top-level block list. Empty and skipped units remain visible instead of shifting later page or sheet numbers. Markdown output preserves the same boundaries in paired HTML comments.
+
+Standard XLSX/XLSM DrawingML images are retained in `document.assets` and placed in their anchored cells when those cells are inside the used range. Image-only, absolute-positioned, and distant-anchor images remain scoped to their sheet without expanding a sparse grid.
+
 ## How it works
 
 ```

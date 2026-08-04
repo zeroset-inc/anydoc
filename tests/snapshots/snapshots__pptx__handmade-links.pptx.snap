@@ -2,10 +2,18 @@
 source: tests/snapshots.rs
 expression: output
 ---
+<!-- anydoc:source-unit-start kind=slide ordinal=1 status=parsed -->
+
 [Jump to the second slide](#slide-2)
 
 [External link](https://example.com/)
 
+<!-- anydoc:source-unit-end kind=slide ordinal=1 status=parsed -->
+
+<!-- anydoc:source-unit-start kind=slide ordinal=2 status=parsed -->
+
 <a id="slide-2"></a>
 
 Second slide content
+
+<!-- anydoc:source-unit-end kind=slide ordinal=2 status=parsed -->
