@@ -125,38 +125,64 @@ fn render_document_markdown(doc: &Document, rc: &Ctx) -> String {
 }
 
 fn render_note_definitions(doc: &Document, rc: &Ctx) -> Vec<String> {
-    rendered_note_definitions(doc, rc).into_iter().map(|(_, markdown)| markdown).collect()
+    rendered_canonical_notes(doc, rc).into_iter().filter_map(|rendered| rendered.markdown).collect()
 }
 
-fn rendered_note_definitions<'a>(doc: &'a Document, rc: &Ctx) -> Vec<(&'a Note, String)> {
-    let mut parts = Vec::new();
-    let mut rendered_defs: HashSet<usize> = HashSet::new();
-    let mut ordered: Vec<(&Note, usize)> =
-        doc.notes.iter().filter_map(|n| rc.nums.get(&n.id).map(|&num| (n, num))).collect();
-    ordered.sort_by_key(|(_, num)| *num);
-    for (note, num) in ordered {
-        // Duplicate note ids collapse to one number; render one definition.
-        if !rendered_defs.insert(num) {
-            log::debug!("duplicate note id {:?} dropped from output", note.id);
+struct CanonicalNoteRender<'a> {
+    note: &'a Note,
+    markdown: Option<String>,
+}
+
+/// Select the first structurally non-blank note for each id in storage order.
+fn canonical_notes(doc: &Document) -> Vec<&Note> {
+    let mut ids = HashSet::new();
+    let mut notes = Vec::new();
+    for note in &doc.notes {
+        if note.blocks.iter().all(block_is_blank) {
             continue;
         }
-        let body = render_blocks(&note.blocks, rc);
-        if body.is_empty() {
+        if !ids.insert(note.id.as_str()) {
             continue;
         }
-        let mut lines = body.lines();
-        let first = lines.next().unwrap_or("");
-        let mut s = format!("[^{num}]: {first}");
-        for line in lines {
-            s.push('\n');
-            if !line.is_empty() {
-                s.push_str("    ");
-                s.push_str(line);
-            }
-        }
-        parts.push((note, s));
+        notes.push(note);
     }
-    parts
+    notes
+}
+
+fn rendered_canonical_notes<'a>(doc: &'a Document, rc: &Ctx) -> Vec<CanonicalNoteRender<'a>> {
+    let mut ordered: Vec<(&Note, usize)> = canonical_notes(doc)
+        .into_iter()
+        .map(|note| {
+            let num = *rc.nums.get(&note.id).expect("every canonical note was numbered");
+            (note, num)
+        })
+        .collect();
+    ordered.sort_by_key(|(_, num)| *num);
+    ordered
+        .into_iter()
+        .map(|(note, num)| CanonicalNoteRender {
+            note,
+            markdown: render_note_definition(note, num, rc),
+        })
+        .collect()
+}
+
+fn render_note_definition(note: &Note, num: usize, rc: &Ctx) -> Option<String> {
+    let body = render_blocks(&note.blocks, rc);
+    if body.is_empty() {
+        return None;
+    }
+    let mut lines = body.lines();
+    let first = lines.next().unwrap_or("");
+    let mut s = format!("[^{num}]: {first}");
+    for line in lines {
+        s.push('\n');
+        if !line.is_empty() {
+            s.push_str("    ");
+            s.push_str(line);
+        }
+    }
+    Some(s)
 }
 
 fn finish_markdown(mut out: String) -> String {
@@ -208,18 +234,20 @@ fn render_document_parts(doc: &Document, rc: &Ctx) -> Vec<RenderedPart> {
         }
     }
 
-    let note_definitions = rendered_note_definitions(doc, rc);
-    let note_markdown = note_definitions
+    let rendered_notes = rendered_canonical_notes(doc, rc);
+    let note_markdown = rendered_notes
         .iter()
-        .map(|(_, markdown)| markdown.as_str())
+        .filter_map(|rendered| rendered.markdown.as_deref())
         .collect::<Vec<_>>()
         .join("\n\n");
     let note_asset_ids = collect_asset_ids_from_notes(
-        note_definitions.iter().map(|(note, _)| *note),
+        rendered_notes.iter().map(|rendered| rendered.note),
         &mut referenced_assets,
     );
-    // Assets owned by dropped empty or duplicate notes are not unreferenced
-    // package assets: their content was intentionally omitted with the note.
+    // Canonical note assets were retained above, including notes whose image
+    // has no renderable alt text. Mark every note asset seen afterward so
+    // assets owned only by deliberately dropped duplicates do not reappear as
+    // unreferenced package assets.
     for note in &doc.notes {
         walk_asset_ids(&note.blocks, &mut |id| {
             referenced_assets.insert(id);
@@ -405,19 +433,16 @@ fn percent_encode(value: &str) -> String {
 }
 
 /// Number notes in first-reference order; unreferenced notes follow at the
-/// end. The first note wins a duplicated id.
+/// end. The first structurally non-blank note wins a duplicated id.
 fn number_notes(doc: &Document) -> NoteNumbers {
-    let mut valid: HashMap<&str, &Note> = HashMap::new();
-    for note in &doc.notes {
-        if !note.blocks.iter().all(block_is_blank) {
-            valid.entry(note.id.as_str()).or_insert(note);
-        }
-    }
+    let canonical = canonical_notes(doc);
+    let valid: HashMap<&str, &Note> =
+        canonical.iter().map(|note| (note.id.as_str(), *note)).collect();
     let mut order: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
     collect_note_refs(&doc.blocks, &valid, &mut order, &mut seen);
-    for note in &doc.notes {
-        if valid.contains_key(note.id.as_str()) && seen.insert(note.id.clone()) {
+    for note in canonical {
+        if seen.insert(note.id.clone()) {
             order.push(note.id.clone());
         }
     }

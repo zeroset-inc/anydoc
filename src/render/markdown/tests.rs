@@ -775,6 +775,45 @@ fn rendered_note_assets_follow_definition_order_and_exclude_duplicates() {
 }
 
 #[test]
+fn render_empty_canonical_note_keeps_asset_and_blank_duplicate_does_not_win() {
+    let document = Document {
+        blocks: vec![Block::Paragraph(vec![Inline::plain("Text"), Inline::NoteRef("a".into())])],
+        source_units: Vec::new(),
+        notes: vec![
+            note("a", vec![Block::Paragraph(vec![])]),
+            note(
+                "a",
+                vec![Block::Paragraph(vec![Inline::Image {
+                    alt: " ".into(),
+                    source: ImageSource::Asset(AssetId(0)),
+                }])],
+            ),
+            note(
+                "a",
+                vec![Block::Paragraph(vec![Inline::Image {
+                    alt: "duplicate".into(),
+                    source: ImageSource::Asset(AssetId(1)),
+                }])],
+            ),
+        ],
+        assets: (0..2)
+            .map(|id| Asset {
+                id: AssetId(id),
+                media_type: "image/png".into(),
+                origin_part: format!("image{id}.png"),
+                bytes: vec![id as u8],
+            })
+            .collect(),
+    };
+
+    let rendered = render_document(&document);
+    let trailing = rendered.parts.last().expect("the body produces a part");
+
+    assert_eq!(rendered.markdown, "Text[^1]\n");
+    assert_eq!(trailing.asset_ids, vec![AssetId(0)]);
+}
+
+#[test]
 fn task_list() {
     let md = doc(vec![Block::List(List {
         marker: MarkerKind::Bullet,
