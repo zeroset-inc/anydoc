@@ -112,8 +112,14 @@ fn to_document(
     format: Option<&str>,
 ) -> PyResult<document::Document> {
     let format = format.map(parse_format).transpose()?;
-    let parsed = py.detach(|| anydoc::to_document(&data, format)).map_err(convert_error)?;
-    document::document(py, parsed)
+    let (parsed, rendered) = py
+        .detach(|| {
+            let parsed = anydoc::to_document(&data, format)?;
+            let rendered = anydoc::render_document(&parsed);
+            Ok::<_, anydoc::ConvertError>((parsed, rendered))
+        })
+        .map_err(convert_error)?;
+    document::document(py, parsed, rendered)
 }
 
 /// Convert documents to GitHub-Flavored Markdown.
@@ -136,6 +142,7 @@ fn _anydoc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<document::List>()?;
     m.add_class::<document::ListItem>()?;
     m.add_class::<document::Note>()?;
+    m.add_class::<document::RenderedPart>()?;
     m.add_class::<document::SourceUnit>()?;
     m.add_class::<document::Style>()?;
     m.add_class::<document::Table>()?;

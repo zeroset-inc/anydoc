@@ -39,8 +39,13 @@ markdown = anydoc.to_markdown_bytes(data)
 # Or name it, which signature-less formats (CSV) need:
 markdown = anydoc.to_markdown_bytes(data, "csv")
 
-# Or stop at the document model, which also carries embedded assets:
+# Or get Markdown and the document model from one parse. Rendered parts map
+# source units and embedded assets back to exact ranges in document.blocks:
 document = anydoc.to_document(data)
+markdown = document.markdown
+for part in document.rendered_parts:
+    blocks = document.blocks[part.start_block : part.end_block]
+    assets = [document.assets[asset_id] for asset_id in part.asset_ids]
 ```
 
 ## Format detection
@@ -58,6 +63,8 @@ anydoc.format_from_path("report.odt")  # 'odt'
 Markdown cannot embed bytes, so an embedded image renders as its alt text while the bytes stay on `document.assets`, tagged with a media type and the part they came from. Images that carry an external URL render as ordinary Markdown images. Standard XLSX/XLSM DrawingML images retain their sheet and bounded cell placement.
 
 Presentation slides and spreadsheet sheets are exposed through `document.source_units`. Each unit carries its 1-based ordinal, optional source name, extraction status, and a half-open range into `document.blocks`; empty and skipped units are retained.
+
+`document.rendered_parts` is the ordered partition for consuming that model. Each part carries Markdown for its block range, the corresponding source-unit index when one exists, and recursively discovered embedded asset ids. Gaps and assets without honest source-unit provenance remain in unowned parts rather than being attributed to the nearest slide or sheet.
 
 Full behavior notes and benchmarks live in the [repository README](https://github.com/zeroset-inc/anydoc#readme).
 

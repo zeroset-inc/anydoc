@@ -45,6 +45,11 @@ def to_document(data: bytes | bytearray, format: Format | None = None) -> Docume
 
 @final
 class Document:
+    markdown: str
+    """Complete Markdown, including source-unit markers and note
+    definitions."""
+    rendered_parts: list[RenderedPart]
+    """Ordered source-unit and unowned block ranges."""
     blocks: list[Block]
     source_units: list[SourceUnit]
     """Source-defined units mapped to half-open ranges in `blocks`."""
@@ -52,6 +57,21 @@ class Document:
     """Footnote and endnote bodies, referenced from text by a `note_ref`
     inline."""
     assets: list[Asset]
+
+@final
+class RenderedPart:
+    """Markdown and provenance for one ordered range of a document."""
+
+    markdown: str
+    """Markdown for this range, without source-unit boundary comments."""
+    source_unit_index: int | None
+    """Index into `Document.source_units`, or `None` for unowned content."""
+    start_block: int
+    end_block: int
+    """Half-open range into `Document.blocks`."""
+    asset_ids: list[int]
+    """Distinct embedded asset ids referenced below this range, in first-use
+    order. Unreferenced assets are assigned to a trailing unowned part."""
 
 @final
 class SourceUnit:

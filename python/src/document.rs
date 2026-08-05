@@ -12,6 +12,10 @@ use anydoc::model;
 
 #[pyclass(frozen, get_all, module = "anydoc")]
 pub struct Document {
+    /// Complete Markdown, including source-unit markers and note definitions.
+    markdown: String,
+    /// Ordered source-unit and unowned block ranges. list[RenderedPart]
+    rendered_parts: Py<PyList>,
     /// list[Block]
     blocks: Py<PyList>,
     /// Source-defined units mapped to ranges in `blocks`. list[SourceUnit]
@@ -21,6 +25,31 @@ pub struct Document {
     notes: Py<PyList>,
     /// list[Asset]
     assets: Py<PyList>,
+}
+
+/// Markdown and provenance for one ordered range of a document.
+#[pyclass(frozen, get_all, module = "anydoc")]
+pub struct RenderedPart {
+    /// Markdown for this range, without source-unit boundary comments.
+    markdown: String,
+    /// Index into `Document.source_units`, or None for unowned content.
+    source_unit_index: Option<usize>,
+    /// Half-open range into `Document.blocks`.
+    start_block: usize,
+    end_block: usize,
+    /// Distinct embedded asset ids referenced below this range, in first-use
+    /// order. Unreferenced assets are assigned to a trailing unowned part.
+    asset_ids: Py<PyList>,
+}
+
+fn rendered_part(py: Python<'_>, part: anydoc::RenderedPart) -> PyResult<RenderedPart> {
+    Ok(RenderedPart {
+        markdown: part.markdown,
+        source_unit_index: part.source_unit_index,
+        start_block: part.start_block,
+        end_block: part.end_block,
+        asset_ids: PyList::new(py, part.asset_ids.into_iter().map(|id| id.0))?.unbind(),
+    })
 }
 
 /// A source-defined unit mapped to a half-open range of top-level blocks.
@@ -405,8 +434,14 @@ fn asset(py: Python<'_>, asset: model::Asset) -> PyResult<Asset> {
     })
 }
 
-pub fn document(py: Python<'_>, document: model::Document) -> PyResult<Document> {
+pub fn document(
+    py: Python<'_>,
+    document: model::Document,
+    rendered: anydoc::RenderedDocument,
+) -> PyResult<Document> {
     Ok(Document {
+        markdown: rendered.markdown,
+        rendered_parts: pylist(py, rendered.parts.into_iter().map(|part| rendered_part(py, part)))?,
         blocks: blocks(py, document.blocks)?,
         source_units: pylist(
             py,

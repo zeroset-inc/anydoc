@@ -1,7 +1,8 @@
-use super::document_to_markdown;
+use super::{document_to_markdown, render_document};
 use crate::model::{
-    AnchorId, Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget, List, ListItem,
-    MarkerKind, Note, NoteKind, SourceUnit, SourceUnitKind, Style, Table, TableKind,
+    AnchorId, Asset, AssetId, Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget,
+    List, ListItem, MarkerKind, Note, NoteKind, SourceUnit, SourceUnitKind, Style, Table,
+    TableKind,
 };
 
 fn doc(blocks: Vec<Block>) -> String {
@@ -36,7 +37,7 @@ fn heading_and_paragraph() {
 
 #[test]
 fn source_units_render_at_boundaries_including_empty_units() {
-    let md = document_to_markdown(&Document {
+    let document = Document {
         blocks: vec![Block::Paragraph(vec![Inline::plain("Second slide")])],
         source_units: vec![
             SourceUnit {
@@ -60,14 +61,67 @@ fn source_units_render_at_boundaries_including_empty_units() {
         ],
         notes: Vec::new(),
         assets: Vec::new(),
-    });
+    };
+    let rendered = render_document(&document);
     assert_eq!(
-        md,
+        rendered.markdown,
         "<!-- anydoc:source-unit-start kind=slide ordinal=1 status=empty -->\n\n\
          <!-- anydoc:source-unit-end kind=slide ordinal=1 status=empty -->\n\n\
          <!-- anydoc:source-unit-start kind=slide ordinal=2 status=parsed -->\n\nSecond slide\n\n\
          <!-- anydoc:source-unit-end kind=slide ordinal=2 status=parsed -->\n"
     );
+    assert_eq!(rendered.parts.len(), 2);
+    assert_eq!(
+        rendered
+            .parts
+            .iter()
+            .map(|part| (part.source_unit_index, part.start_block, part.end_block))
+            .collect::<Vec<_>>(),
+        vec![(Some(0), 0, 0), (Some(1), 0, 1)]
+    );
+    assert!(rendered.parts[0].markdown.is_empty());
+    assert_eq!(rendered.parts[1].markdown, "Second slide\n");
+}
+
+#[test]
+fn rendered_parts_keep_adjacent_empty_and_skipped_units() {
+    let document = Document {
+        blocks: Vec::new(),
+        source_units: vec![
+            SourceUnit {
+                kind: SourceUnitKind::Slide,
+                ordinal: 1,
+                name: None,
+                status: crate::model::SourceUnitStatus::Empty,
+                reason: None,
+                start_block: 0,
+                end_block: 0,
+            },
+            SourceUnit {
+                kind: SourceUnitKind::Slide,
+                ordinal: 2,
+                name: None,
+                status: crate::model::SourceUnitStatus::Skipped,
+                reason: Some("missing-slide-part".into()),
+                start_block: 0,
+                end_block: 0,
+            },
+        ],
+        notes: Vec::new(),
+        assets: Vec::new(),
+    };
+
+    let rendered = render_document(&document);
+    assert_eq!(rendered.parts.len(), 2);
+    assert_eq!(
+        rendered
+            .parts
+            .iter()
+            .map(|part| (part.source_unit_index, part.start_block, part.end_block))
+            .collect::<Vec<_>>(),
+        vec![(Some(0), 0, 0), (Some(1), 0, 0)]
+    );
+    assert!(rendered.parts.iter().all(|part| part.markdown.is_empty()));
 }
 
 #[test]
@@ -159,6 +213,112 @@ fn source_unit_end_does_not_claim_trailing_unscoped_blocks() {
         "<!-- anydoc:source-unit-start kind=sheet ordinal=1 status=parsed name=Data -->\n\nSheet body\n\n\
          <!-- anydoc:source-unit-end kind=sheet ordinal=1 status=parsed -->\n\nUnpositioned workbook image\n"
     );
+}
+
+#[test]
+fn rendered_parts_partition_blocks_and_find_nested_assets() {
+    let nested_image = Inline::Link {
+        content: vec![Inline::Image {
+            alt: "nested".into(),
+            source: ImageSource::Asset(AssetId(1)),
+        }],
+        target: LinkTarget::External("https://example.com".into()),
+    };
+    let nested = Block::List(List {
+        marker: MarkerKind::Bullet,
+        start: 1,
+        items: vec![ListItem {
+            blocks: vec![Block::BlockQuote(vec![table_from(
+                vec![vec![Cell::from_inlines(vec![nested_image.clone(), nested_image])]],
+                0,
+            )])],
+            checked: None,
+            marker_label: None,
+        }],
+    });
+    let document = Document {
+        blocks: vec![
+            Block::Paragraph(vec![Inline::Image {
+                alt: "before".into(),
+                source: ImageSource::Asset(AssetId(0)),
+            }]),
+            nested,
+            Block::Paragraph(vec![Inline::plain("after")]),
+        ],
+        source_units: vec![SourceUnit {
+            kind: SourceUnitKind::Slide,
+            ordinal: 1,
+            name: None,
+            status: crate::model::SourceUnitStatus::Parsed,
+            reason: None,
+            start_block: 1,
+            end_block: 2,
+        }],
+        notes: vec![note(
+            "image-note",
+            vec![Block::Paragraph(vec![Inline::Image {
+                alt: "note image".into(),
+                source: ImageSource::Asset(AssetId(2)),
+            }])],
+        )],
+        assets: (0..4)
+            .map(|id| Asset {
+                id: AssetId(id),
+                media_type: "image/png".into(),
+                origin_part: format!("image{id}.png"),
+                bytes: vec![id as u8],
+            })
+            .collect(),
+    };
+
+    let rendered = render_document(&document);
+    assert_eq!(rendered.markdown, document_to_markdown(&document));
+    assert_eq!(rendered.parts.len(), 3);
+    assert_eq!(
+        rendered
+            .parts
+            .iter()
+            .map(|part| (part.source_unit_index, part.start_block, part.end_block))
+            .collect::<Vec<_>>(),
+        vec![(None, 0, 1), (Some(0), 1, 2), (None, 2, 3)]
+    );
+    assert_eq!(rendered.parts[0].asset_ids, vec![AssetId(0)]);
+    assert_eq!(rendered.parts[1].asset_ids, vec![AssetId(1)]);
+    assert_eq!(rendered.parts[2].asset_ids, vec![AssetId(2), AssetId(3)]);
+    assert_eq!(rendered.parts[0].markdown, "before\n");
+    assert!(rendered.parts[1].markdown.contains("nested"));
+    assert_eq!(rendered.parts[2].markdown, "after\n\n[^1]: note image\n");
+}
+
+#[test]
+fn unreferenced_assets_get_a_trailing_unowned_part() {
+    let document = Document {
+        blocks: vec![Block::Paragraph(vec![Inline::plain("slide")])],
+        source_units: vec![SourceUnit {
+            kind: SourceUnitKind::Slide,
+            ordinal: 1,
+            name: None,
+            status: crate::model::SourceUnitStatus::Parsed,
+            reason: None,
+            start_block: 0,
+            end_block: 1,
+        }],
+        notes: Vec::new(),
+        assets: vec![Asset {
+            id: AssetId(0),
+            media_type: "image/png".into(),
+            origin_part: "Pictures stream".into(),
+            bytes: vec![0],
+        }],
+    };
+
+    let rendered = render_document(&document);
+    assert_eq!(rendered.parts.len(), 2);
+    assert_eq!(rendered.parts[0].source_unit_index, Some(0));
+    assert_eq!(rendered.parts[1].source_unit_index, None);
+    assert_eq!((rendered.parts[1].start_block, rendered.parts[1].end_block), (1, 1));
+    assert!(rendered.parts[1].markdown.is_empty());
+    assert_eq!(rendered.parts[1].asset_ids, vec![AssetId(0)]);
 }
 
 #[test]
@@ -562,6 +722,95 @@ fn duplicate_note_ids_render_one_definition() {
         assets: Vec::new(),
     });
     assert_eq!(md, "Text[^1]\n\n[^1]: First wins.\n");
+}
+
+#[test]
+fn rendered_note_assets_follow_definition_order_and_exclude_duplicates() {
+    let document = Document {
+        blocks: vec![Block::Paragraph(vec![
+            Inline::NoteRef("b".into()),
+            Inline::NoteRef("a".into()),
+        ])],
+        source_units: Vec::new(),
+        notes: vec![
+            note(
+                "a",
+                vec![Block::Paragraph(vec![Inline::Image {
+                    alt: "second".into(),
+                    source: ImageSource::Asset(AssetId(0)),
+                }])],
+            ),
+            note(
+                "b",
+                vec![Block::Paragraph(vec![Inline::Image {
+                    alt: "first".into(),
+                    source: ImageSource::Asset(AssetId(1)),
+                }])],
+            ),
+            note(
+                "b",
+                vec![Block::Paragraph(vec![Inline::Image {
+                    alt: "duplicate".into(),
+                    source: ImageSource::Asset(AssetId(2)),
+                }])],
+            ),
+        ],
+        assets: (0..3)
+            .map(|id| Asset {
+                id: AssetId(id),
+                media_type: "image/png".into(),
+                origin_part: format!("image{id}.png"),
+                bytes: vec![id as u8],
+            })
+            .collect(),
+    };
+
+    let rendered = render_document(&document);
+    let trailing = rendered.parts.last().expect("note definitions produce a part");
+
+    assert!(trailing.markdown.contains("[^1]: first"));
+    assert!(trailing.markdown.contains("[^2]: second"));
+    assert!(!trailing.markdown.contains("duplicate"));
+    assert_eq!(trailing.asset_ids, vec![AssetId(1), AssetId(0)]);
+}
+
+#[test]
+fn render_empty_canonical_note_keeps_asset_and_blank_duplicate_does_not_win() {
+    let document = Document {
+        blocks: vec![Block::Paragraph(vec![Inline::plain("Text"), Inline::NoteRef("a".into())])],
+        source_units: Vec::new(),
+        notes: vec![
+            note("a", vec![Block::Paragraph(vec![])]),
+            note(
+                "a",
+                vec![Block::Paragraph(vec![Inline::Image {
+                    alt: " ".into(),
+                    source: ImageSource::Asset(AssetId(0)),
+                }])],
+            ),
+            note(
+                "a",
+                vec![Block::Paragraph(vec![Inline::Image {
+                    alt: "duplicate".into(),
+                    source: ImageSource::Asset(AssetId(1)),
+                }])],
+            ),
+        ],
+        assets: (0..2)
+            .map(|id| Asset {
+                id: AssetId(id),
+                media_type: "image/png".into(),
+                origin_part: format!("image{id}.png"),
+                bytes: vec![id as u8],
+            })
+            .collect(),
+    };
+
+    let rendered = render_document(&document);
+    let trailing = rendered.parts.last().expect("the body produces a part");
+
+    assert_eq!(rendered.markdown, "Text[^1]\n");
+    assert_eq!(trailing.asset_ids, vec![AssetId(0)]);
 }
 
 #[test]

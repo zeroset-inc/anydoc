@@ -15,6 +15,7 @@ mod render;
 mod shared;
 
 pub use error::ConvertError;
+pub use render::markdown::{RenderedDocument, RenderedPart, render_document};
 
 use render::markdown::document_to_markdown;
 
