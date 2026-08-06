@@ -347,4 +347,40 @@ mod tests {
             .collect();
         assert_eq!(headings, vec!["1. Intro", "2. Details"]);
     }
+
+    #[test]
+    fn heading_style_emphasis_is_structural_but_direct_run_emphasis_survives() {
+        let document = format!(
+            r#"<w:document {W}><w:body>
+            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr>
+                <w:r><w:t>plain</w:t></w:r>
+                <w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve"> explicit</w:t></w:r>
+            </w:p></w:body></w:document>"#
+        );
+        let styles = format!(
+            r#"<w:styles {W}>
+            <w:style w:type="paragraph" w:styleId="H1">
+                <w:name w:val="heading 1"/><w:rPr><w:b/></w:rPr>
+            </w:style></w:styles>"#
+        );
+        let bytes = docx_parts(&[("word/document.xml", &document), ("word/styles.xml", &styles)]);
+        let doc = parse(&bytes).unwrap();
+        let Some(Block::Heading { content, .. }) = doc.blocks.first() else {
+            panic!("expected heading: {:?}", doc.blocks)
+        };
+        let styles: Vec<crate::model::Style> = content
+            .iter()
+            .filter_map(|inline| match inline {
+                Inline::Text { style, .. } => Some(*style),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            styles,
+            vec![
+                crate::model::Style::PLAIN,
+                crate::model::Style { bold: true, ..crate::model::Style::PLAIN },
+            ]
+        );
+    }
 }

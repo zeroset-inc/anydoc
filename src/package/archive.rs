@@ -89,12 +89,12 @@ impl<'a> Package<'a> {
         Ok(Some(bytes))
     }
 
-    /// Read a part that must exist for any meaningful output.
     /// True when a part exists, without reading (or budget-charging) it.
     pub fn has_part(&self, name: &str) -> bool {
         self.zip.index_for_name(name.trim_start_matches('/')).is_some()
     }
 
+    /// Read a part that must exist for any meaningful output.
     pub fn required_part(&mut self, name: &str) -> Result<Rc<[u8]>, ConvertError> {
         self.part(name)?.ok_or_else(|| ConvertError::MissingPart { part: name.to_string() })
     }

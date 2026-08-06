@@ -14,7 +14,6 @@ use crate::model::{
 };
 use crate::package::limits;
 use crate::shared::binary::{get_u32, read_ole_stream};
-use crate::shared::delta::{StyleDelta, rebase_emphasis};
 use crate::shared::list::{ListEntry, ListKey, MarkerKind, flush_list};
 use crate::shared::officeart::record_at;
 use crate::shared::text::clean_text;
@@ -608,8 +607,16 @@ impl Extractor {
         for c in shape.text.chars() {
             let d = level_default(para_props(para_run).0);
             let style = Style {
-                bold: char_run.and_then(|r| r.bold).or(d.bold).unwrap_or(false),
-                italic: char_run.and_then(|r| r.italic).or(d.italic).unwrap_or(false),
+                // A title's master/level defaults are structural heading
+                // typography; only character-run exceptions become inline.
+                bold: char_run
+                    .and_then(|r| r.bold)
+                    .or(if is_title { None } else { d.bold })
+                    .unwrap_or(false),
+                italic: char_run
+                    .and_then(|r| r.italic)
+                    .or(if is_title { None } else { d.italic })
+                    .unwrap_or(false),
                 strike: false,
                 code: false,
             };
@@ -664,16 +671,13 @@ impl Extractor {
             paragraphs.push((inlines, depth, bullet));
         }
 
-        for (mut inlines, depth, bullet) in paragraphs {
+        for (inlines, depth, bullet) in paragraphs {
             if inlines_are_empty(&inlines) {
                 flush_list(&mut self.current, &mut self.list_run);
                 continue;
             }
             if is_title {
                 flush_list(&mut self.current, &mut self.list_run);
-                let d = level_default(depth);
-                let base = StyleDelta { bold: d.bold, italic: d.italic, ..Default::default() };
-                rebase_emphasis(&mut inlines, base.resolve());
                 let anchor = Some(crate::model::inlines_to_plain_text(&inlines));
                 self.current.push(Block::Heading { level: 2, anchor, content: inlines });
                 continue;

@@ -18,6 +18,9 @@ concurrency:
 
 jobs:
   gate:
+    # Fork releases use release-zeroset-anydoc.yml and must never publish the
+    # independently versioned Firecrawl packages from this workflow.
+    if: github.repository == 'firecrawl/anydoc'
     name: Version gate
     runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:

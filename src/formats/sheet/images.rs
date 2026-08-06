@@ -5,7 +5,8 @@ use crate::model::{ImageSource, Inline};
 use crate::package::Package;
 use crate::package::path::resolve;
 use crate::package::relationships::{
-    Relationships, TargetMode, read_rels, rel_type, rels_part_for,
+    RelationshipPart, Relationships, TargetMode, read_relationship_part, read_rels, rel_type,
+    rels_part_for,
 };
 use crate::package::xml::{Element, ns};
 use crate::shared::assets::{AssetSink, rel_image_source};
@@ -179,7 +180,12 @@ fn read_sheet_images(
     sheet_part: &str,
     assets: &RefCell<AssetSink>,
 ) -> Result<(Vec<SheetImage>, bool), ConvertError> {
-    let sheet_rels = read_rels(&mut pkg.borrow_mut(), &rels_part_for(sheet_part))?;
+    let sheet_rels =
+        match read_relationship_part(&mut pkg.borrow_mut(), &rels_part_for(sheet_part))? {
+            RelationshipPart::Absent => return Ok((Vec::new(), false)),
+            RelationshipPart::Unreadable => return Ok((Vec::new(), true)),
+            RelationshipPart::Parsed(rels) => rels,
+        };
     // Most sheets have no drawings. Check the small relationships part first
     // so the common path does not decompress and DOM-parse the large worksheet
     // a second time after Calamine has already read its cells.

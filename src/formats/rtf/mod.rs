@@ -557,7 +557,10 @@ impl<'a> Parser<'a> {
                     self.flush_pending();
                     self.state.outline = def.outline;
                     self.state.style = def.delta.apply(self.state.style);
-                    self.state.style_base = self.state.style;
+                    // Keep the style definition separate from already-active
+                    // direct formatting. Folding the combined state into the
+                    // base would erase controls that appeared before `\sN`.
+                    self.state.style_base = def.delta.resolve();
                 }
             }
             "par" | "sect" => {
@@ -811,9 +814,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn set_style(&mut self, f: impl FnOnce(&mut Style)) {
+    fn set_style(&mut self, style: impl FnOnce(&mut Style)) {
         self.flush_pending();
-        f(&mut self.state.style);
+        style(&mut self.state.style);
     }
 
     fn push_char(&mut self, c: char) {
@@ -1047,6 +1050,23 @@ mod tests {
             let markdown = crate::to_markdown_bytes(src.as_bytes(), crate::Format::Rtf).unwrap();
             assert_eq!(markdown, "Alfa\\\nBeta\n", "source: {src}");
         }
+    }
+
+    #[test]
+    fn direct_formatting_before_style_is_not_folded_into_the_heading_base() {
+        let direct_before = crate::to_markdown_bytes(
+            br"{\rtf1{\stylesheet{\s1\b\outlinelevel0 Heading;}}\i\s1 Heading\par}",
+            crate::Format::Rtf,
+        )
+        .unwrap();
+        assert_eq!(direct_before, "# *Heading*\n");
+
+        let exporter_restatement = crate::to_markdown_bytes(
+            br"{\rtf1{\stylesheet{\s1\b\outlinelevel0 Heading;}}\s1\b Heading\par}",
+            crate::Format::Rtf,
+        )
+        .unwrap();
+        assert_eq!(exporter_restatement, "# Heading\n");
     }
 
     #[test]

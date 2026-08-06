@@ -460,6 +460,55 @@ mod tests {
         w.finish().unwrap().into_inner()
     }
 
+    /// Two image-bearing sheets, so one drawing graph can fail without
+    /// obscuring whether its healthy sibling was retained.
+    fn xlsx_with_two_image_sheets() -> Vec<u8> {
+        let workbook = r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Healthy" sheetId="1" r:id="rId1"/><sheet name="Broken" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+        let workbook_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
+        let worksheet = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><drawing r:id="rIdDrawing"/></worksheet>"#;
+        let worksheet_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing2.xml"/></Relationships>"#;
+        let drawing = format!(
+            r#"<?xml version="1.0"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">{}</xdr:wsDr>"#,
+            absolute_anchor("Broken")
+        );
+        let drawing_rels = format!(
+            r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="{}" Target="../media/image2.png"/></Relationships>"#,
+            images::IMAGE_REL
+        );
+
+        let bytes = xlsx_with_images("", None, &absolute_anchor("Healthy"), images::IMAGE_REL);
+        let bytes = rewrite_zip_part(&bytes, "xl/workbook.xml", Some(workbook.as_bytes()));
+        let bytes =
+            rewrite_zip_part(&bytes, "xl/_rels/workbook.xml.rels", Some(workbook_rels.as_bytes()));
+        append_zip_parts(
+            &bytes,
+            &[
+                ("xl/worksheets/sheet2.xml", worksheet.as_bytes()),
+                ("xl/worksheets/_rels/sheet2.xml.rels", worksheet_rels.as_bytes()),
+                ("xl/drawings/drawing2.xml", drawing.as_bytes()),
+                ("xl/drawings/_rels/drawing2.xml.rels", drawing_rels.as_bytes()),
+                ("xl/media/image2.png", b"PNG-SECOND-IMAGE"),
+            ],
+        )
+    }
+
+    fn append_zip_parts(bytes: &[u8], parts: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index).unwrap();
+            let options =
+                zip::write::SimpleFileOptions::default().compression_method(file.compression());
+            writer.start_file(file.name(), options).unwrap();
+            std::io::copy(&mut file, &mut writer).unwrap();
+        }
+        for (name, body) in parts {
+            writer.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            writer.write_all(body).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
     /// Replace or remove one ZIP member without changing the other fixture
     /// parts. `None` removes the member.
     fn rewrite_zip_part(bytes: &[u8], target: &str, replacement: Option<&[u8]>) -> Vec<u8> {
@@ -822,7 +871,61 @@ mod tests {
     }
 
     #[test]
-    fn compact_assets_include_healthy_sheets_without_images() {
+    fn compact_assets_isolate_corrupt_drawing_parts() {
+        for part in ["xl/drawings/drawing2.xml", "xl/drawings/_rels/drawing2.xml.rels"] {
+            let bytes = xlsx_with_two_image_sheets();
+            let bytes = rewrite_zip_part(&bytes, part, Some(b"<\0"));
+            let manifest = extract_assets(&bytes).unwrap();
+
+            assert_eq!(manifest.source_units.len(), 2, "for {part}");
+            assert_eq!(
+                manifest.source_units[0].status,
+                crate::spreadsheet::SpreadsheetAssetUnitStatus::Complete,
+                "for {part}"
+            );
+            assert_eq!(manifest.source_units[0].asset_ids, [crate::model::AssetId(0)]);
+            assert_eq!(
+                manifest.source_units[1].status,
+                crate::spreadsheet::SpreadsheetAssetUnitStatus::Degraded,
+                "for {part}"
+            );
+            assert_eq!(
+                manifest.source_units[1].reason.as_deref(),
+                Some("worksheet_drawing_unreadable")
+            );
+            assert!(manifest.source_units[1].asset_ids.is_empty());
+            assert_eq!(manifest.assets.len(), 1, "for {part}");
+            assert_eq!(manifest.assets[0].origin_part, "xl/media/image1.png");
+        }
+    }
+
+    #[test]
+    fn compact_assets_mark_present_but_unreadable_sheet_relationships_degraded() {
+        let bytes = xlsx_with_two_image_sheets();
+        let bytes = rewrite_zip_part(&bytes, "xl/worksheets/_rels/sheet2.xml.rels", Some(b"<\0"));
+        let manifest = extract_assets(&bytes).unwrap();
+
+        assert_eq!(manifest.source_units.len(), 2);
+        assert_eq!(
+            manifest.source_units[0].status,
+            crate::spreadsheet::SpreadsheetAssetUnitStatus::Complete
+        );
+        assert_eq!(manifest.source_units[0].asset_ids, [crate::model::AssetId(0)]);
+        assert_eq!(
+            manifest.source_units[1].status,
+            crate::spreadsheet::SpreadsheetAssetUnitStatus::Degraded
+        );
+        assert_eq!(
+            manifest.source_units[1].reason.as_deref(),
+            Some("worksheet_drawing_unreadable")
+        );
+        assert!(manifest.source_units[1].asset_ids.is_empty());
+        assert_eq!(manifest.assets.len(), 1);
+        assert_eq!(manifest.assets[0].origin_part, "xl/media/image1.png");
+    }
+
+    #[test]
+    fn compact_assets_absent_sheet_relationships_are_complete() {
         let manifest = extract_assets(&xlsx_with_merge("D11:E11")).unwrap();
 
         assert_eq!(manifest.source_units.len(), 1);
@@ -897,17 +1000,27 @@ mod tests {
     }
 
     #[test]
-    fn compact_assets_propagate_package_limits() {
-        let anchor = absolute_anchor("Oversize");
-        let mut bytes = xlsx_with_images("", None, &anchor, images::IMAGE_REL);
-        set_declared_size(
-            &mut bytes,
+    fn compact_assets_propagate_optional_part_and_asset_limits() {
+        for part in [
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            "xl/drawings/drawing1.xml",
+            "xl/drawings/_rels/drawing1.xml.rels",
             "xl/media/image1.png",
-            (crate::package::limits::MAX_ENTRY_BYTES + 1) as u32,
-        );
+        ] {
+            let anchor = absolute_anchor("Oversize");
+            let mut bytes = xlsx_with_images("", None, &anchor, images::IMAGE_REL);
+            set_declared_size(
+                &mut bytes,
+                part,
+                (crate::package::limits::MAX_ENTRY_BYTES + 1) as u32,
+            );
 
-        let err = crate::extract_spreadsheet_assets(&bytes).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: "max_entry_bytes", .. }));
+            let err = crate::extract_spreadsheet_assets(&bytes).unwrap_err();
+            assert!(
+                matches!(err, ConvertError::ResourceLimit { limit: "max_entry_bytes", .. }),
+                "expected the package limit for {part}, got {err}"
+            );
+        }
     }
 
     #[test]

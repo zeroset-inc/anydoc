@@ -10,7 +10,7 @@ use crate::model::{
 use crate::package::Package;
 use crate::package::xml::{Element, Node, ns};
 use crate::shared::assets::{AssetSink, media_type_for};
-use crate::shared::delta::{StyleDelta, rebase_emphasis};
+use crate::shared::delta::StyleDelta;
 use crate::shared::text::{clean_text, collapse_ws};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -68,10 +68,14 @@ fn parse_block_elem(
                     .attr(ns::TEXT, "outline-level")
                     .and_then(|v| v.parse::<u8>().ok())
                     .unwrap_or(1);
-                let (inlines, boxes) = parse_inline_content(elem, ctx)?;
+                // Resolve the paragraph chain even though its typography is
+                // structural, preserving cycle/resource validation.
+                paragraph_base(elem, ctx)?;
+                // Paragraph/heading typography is structural; only styles
+                // selected by descendants become inline emphasis.
+                let (inlines, boxes) = parse_inline_content_from(elem, ctx, StyleDelta::default())?;
                 if !inlines_are_empty(&inlines) {
                     let mut content = inlines;
-                    rebase_emphasis(&mut content, paragraph_base(elem, ctx)?.resolve());
                     // ODF outline links target headings by their text; carry
                     // it as the heading's anchor id (without the number).
                     let anchor = Some(crate::model::inlines_to_plain_text(&content));
@@ -272,6 +276,14 @@ fn parse_inline_content(
     ctx: &Ctx,
 ) -> Result<(Vec<Inline>, Vec<Block>), ConvertError> {
     let base = paragraph_base(elem, ctx)?;
+    parse_inline_content_from(elem, ctx, base)
+}
+
+fn parse_inline_content_from(
+    elem: &Element,
+    ctx: &Ctx,
+    base: StyleDelta,
+) -> Result<(Vec<Inline>, Vec<Block>), ConvertError> {
     let mut out = Vec::new();
     let mut boxes = Vec::new();
     walk_inlines(elem, ctx, base, &mut out, &mut boxes)?;

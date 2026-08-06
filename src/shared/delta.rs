@@ -38,10 +38,9 @@ impl StyleDelta {
     }
 }
 
-/// Drop from every run the emphasis `base` already carries. A heading style
-/// defines its own typography, so its runs should carry only what they add
-/// beyond it - otherwise the bold in `## **Heading**` is the style's, not the
-/// author's.
+/// Subtract structural heading emphasis in frontends whose serialized run
+/// stream does not retain enough provenance to distinguish a style value
+/// from an exporter restating that same value (binary DOC and RTF).
 pub fn rebase_emphasis(inlines: &mut [Inline], base: Style) {
     if base == Style::PLAIN {
         return;

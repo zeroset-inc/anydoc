@@ -20,10 +20,6 @@ const SAMPLE_ROWS: usize = 50;
 const DOMINANCE_NUM: usize = 9;
 const DOMINANCE_DEN: usize = 10;
 
-/// Longest a label can be when nothing else distinguishes the first row.
-/// Beyond this the text reads as prose, which is data.
-const MAX_LABEL: usize = 64;
-
 /// What a cell value looks like, at the granularity the vote needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -95,6 +91,12 @@ pub fn resolve_header_rows(table: &Table, declared: usize) -> usize {
 
     let (mut header_votes, mut data_votes) = (0usize, 0usize);
     for (c, label) in head.iter().enumerate().take(width) {
+        let label = label.trim();
+        // Validation above permits only the leading index label to be blank.
+        // It carries no type evidence, so it abstains from the vote.
+        if label.is_empty() {
+            continue;
+        }
         let values: Vec<&str> = body
             .iter()
             .filter_map(|row| row.get(c))
@@ -104,7 +106,6 @@ pub fn resolve_header_rows(table: &Table, declared: usize) -> usize {
         if values.is_empty() {
             continue;
         }
-        let label = label.trim();
         match dominant_kind(&values) {
             // A column of numbers, dates or booleans under a label that is
             // none of those: the label does not belong to its own column.
@@ -125,13 +126,6 @@ pub fn resolve_header_rows(table: &Table, declared: usize) -> usize {
         }
     }
 
-    if header_votes == 0 && data_votes == 0 {
-        // Text above text, with no value repeated: only the shape of the row
-        // is left to go on. Short single-line entries read as labels, and the
-        // alternative is the empty header row every such table renders today.
-        let labelled = head.iter().take(width).all(|v| v.chars().count() <= MAX_LABEL);
-        return usize::from(labelled);
-    }
     usize::from(header_votes > data_votes)
 }
 
@@ -266,10 +260,9 @@ mod tests {
     }
 
     #[test]
-    fn all_text_falls_back_to_row_shape() {
-        assert_eq!(detect(&[&["col1", "col2"], &["naïve", "café"], &["Αθήνα", "数据"]]), 1);
-        let long = "l".repeat(MAX_LABEL + 1);
-        assert_eq!(detect(&[&[&long, "col2"], &["a", "b"], &["c", "d"]]), 0);
+    fn all_text_without_positive_evidence_is_data() {
+        assert_eq!(detect(&[&["Alice", "Smith"], &["Bob", "Jones"]]), 0);
+        assert_eq!(detect(&[&["col1", "col2"], &["naïve", "café"], &["Αθήνα", "数据"]]), 0);
     }
 
     #[test]
@@ -287,14 +280,19 @@ mod tests {
     #[test]
     fn a_leading_index_column_may_be_unlabelled() {
         assert_eq!(detect(&[&["", "qty"], &["a", "1"], &["b", "2"]]), 1);
+        assert_eq!(detect(&[&["", "qty"], &["0", "10"], &["1", "20"]]), 1);
     }
 
     #[test]
     fn a_mixed_column_abstains_rather_than_voting_against() {
-        // The first row is text over a column of mixed literals; the type
-        // signal is absent, so the row shape decides.
+        // The mixed value column carries no type signal, so the typed count
+        // column's positive vote decides.
         assert_eq!(
-            detect(&[&["kind", "value"], &["percent", "15.5%"], &["date", "2026-03-15"]]),
+            detect(&[
+                &["kind", "value", "count"],
+                &["percent", "15.5%", "1"],
+                &["date", "2026-03-15", "2"]
+            ]),
             1
         );
     }

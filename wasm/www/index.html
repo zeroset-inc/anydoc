@@ -313,10 +313,15 @@
           border-color 0.15s,
           background 0.15s;
       }
-      .drop:hover,
+      .drop:not(:disabled):hover,
       .drop.over {
         border-color: var(--heat);
         background: var(--heat-4);
+      }
+      .drop:disabled,
+      .samples button:disabled {
+        cursor: wait;
+        opacity: 0.65;
       }
       .drop .big {
         display: block;
@@ -351,7 +356,7 @@
           color 0.15s,
           border-color 0.15s;
       }
-      .samples button:hover {
+      .samples button:not(:disabled):hover {
         border-color: var(--heat);
         color: var(--heat);
       }
@@ -641,7 +646,7 @@
         </section>
 
         <section class="band">
-          <button class="drop" id="drop" aria-describedby="drop-hint">
+          <button class="drop" id="drop" aria-describedby="drop-hint" disabled>
             <span class="big" id="drop-title"
               >Loading the converter&hellip;</span
             >
@@ -649,11 +654,11 @@
               >a few MB of WebAssembly, downloaded once</span
             >
           </button>
-          <input type="file" id="file" hidden />
+          <input type="file" id="file" hidden disabled />
           <p class="samples">
             No document at hand? Try a sample:
-            <button id="sample-rtf">notes.rtf</button>
-            <button id="sample-csv">report.csv</button>
+            <button id="sample-rtf" disabled>notes.rtf</button>
+            <button id="sample-csv" disabled>report.csv</button>
           </p>
         </section>
 
@@ -839,28 +844,35 @@
 
       const drop = $('drop');
       const file = $('file');
-      drop.addEventListener('click', () => file.click());
-      file.addEventListener('change', () => {
-        if (file.files[0]) convertFile(file.files[0]);
-      });
+      const sampleRtf = $('sample-rtf');
+      const sampleCsv = $('sample-csv');
 
       for (const eventName of ['dragover', 'drop']) {
         window.addEventListener(eventName, (event) => event.preventDefault());
       }
-      drop.addEventListener('dragover', () => drop.classList.add('over'));
-      drop.addEventListener('dragleave', () => drop.classList.remove('over'));
-      drop.addEventListener('drop', (event) => {
-        drop.classList.remove('over');
-        const dropped = event.dataTransfer?.files?.[0];
-        if (dropped) convertFile(dropped);
-      });
 
-      $('sample-rtf').addEventListener('click', () =>
-        convert('notes.rtf', new TextEncoder().encode(SAMPLE_RTF)),
-      );
-      $('sample-csv').addEventListener('click', () =>
-        convert('report.csv', new TextEncoder().encode(SAMPLE_CSV)),
-      );
+      function activateConverter() {
+        drop.addEventListener('click', () => file.click());
+        file.addEventListener('change', () => {
+          if (file.files[0]) convertFile(file.files[0]);
+        });
+        drop.addEventListener('dragover', () => drop.classList.add('over'));
+        drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+        drop.addEventListener('drop', (event) => {
+          drop.classList.remove('over');
+          const dropped = event.dataTransfer?.files?.[0];
+          if (dropped) convertFile(dropped);
+        });
+        sampleRtf.addEventListener('click', () =>
+          convert('notes.rtf', new TextEncoder().encode(SAMPLE_RTF)),
+        );
+        sampleCsv.addEventListener('click', () =>
+          convert('report.csv', new TextEncoder().encode(SAMPLE_CSV)),
+        );
+        for (const control of [drop, file, sampleRtf, sampleCsv]) {
+          control.disabled = false;
+        }
+      }
 
       $('copy').addEventListener('click', async () => {
         await navigator.clipboard.writeText(markdown);
@@ -884,6 +896,7 @@
 
       try {
         await init();
+        activateConverter();
         dropTitle.textContent = 'Drop a document here';
         dropHint.innerHTML =
           'or <u>browse</u> for one. Conversion happens locally, nothing is uploaded.';

@@ -9,7 +9,7 @@ use crate::model::{
 use crate::package::Package;
 use crate::package::relationships::{RelTarget, Relationships, TargetMode, rel_target_bytes};
 use crate::package::xml::{Element, ns};
-use crate::shared::delta::rebase_emphasis;
+use crate::shared::delta::StyleDelta;
 use crate::shared::fields::{FieldFrame, field_result};
 use crate::shared::header::resolve_header_rows;
 use crate::shared::list::{ListEntry, ListKey, flush_list};
@@ -89,8 +89,6 @@ pub(super) enum ParaKind {
         /// separator), prepended to the content: headings have no native
         /// numbering in the output.
         label: Option<String>,
-        /// The heading style's own emphasis, subtracted from its runs.
-        base: Style,
     },
     ListItem {
         ilvl: usize,
@@ -168,11 +166,10 @@ fn emit_paragraph(
             item.extend(item_blocks);
             list_run.push(ListEntry { level: ilvl, key, number, label, blocks: item });
         }
-        ParaKind::Heading { level, label, base } => {
+        ParaKind::Heading { level, label } => {
             flush_list(blocks, list_run);
             let (mut content, after) = split_pieces(pieces);
             if !inlines_are_empty(&content) {
-                rebase_emphasis(&mut content, base);
                 if let Some(label) = label {
                     content.insert(0, Inline::Text { text: label, style: Style::PLAIN });
                 }
@@ -230,7 +227,7 @@ fn parse_paragraph(p: &Element, ctx: &Ctx) -> Result<(ParaKind, Vec<Piece>), Con
                 }
                 _ => None,
             };
-            ParaKind::Heading { level, label, base: paragraph_level }
+            ParaKind::Heading { level, label }
         }
         None => match numbering {
             Some((ilvl, key, number, label)) => ParaKind::ListItem { ilvl, key, number, label },
@@ -238,7 +235,7 @@ fn parse_paragraph(p: &Element, ctx: &Ctx) -> Result<(ParaKind, Vec<Piece>), Con
         },
     };
 
-    let mut walker = InlineWalker::new(ctx, paragraph_level);
+    let mut walker = InlineWalker::new(ctx, paragraph_level, heading.is_some());
     walker.walk(p)?;
     Ok((kind, walker.finish()))
 }
@@ -305,14 +302,22 @@ fn resolve_numbering(
 struct InlineWalker<'a, 'b, 'e> {
     ctx: &'e Ctx<'a, 'b>,
     base: Style,
+    heading: bool,
     pieces: Vec<Piece>,
     current: Vec<Inline>,
     fields: Vec<FieldFrame>,
 }
 
 impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
-    fn new(ctx: &'e Ctx<'a, 'b>, base: Style) -> Self {
-        InlineWalker { ctx, base, pieces: Vec::new(), current: Vec::new(), fields: Vec::new() }
+    fn new(ctx: &'e Ctx<'a, 'b>, base: Style, heading: bool) -> Self {
+        InlineWalker {
+            ctx,
+            base,
+            heading,
+            pieces: Vec::new(),
+            current: Vec::new(),
+            fields: Vec::new(),
+        }
     }
 
     fn push(&mut self, inline: Inline) {
@@ -350,7 +355,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 "r" => self.walk_run(child)?,
                 "hyperlink" => {
                     let target = self.hyperlink_link_target(child);
-                    let mut inner = InlineWalker::new(self.ctx, self.base);
+                    let mut inner = InlineWalker::new(self.ctx, self.base, self.heading);
                     inner.walk(child)?;
                     let (content, attachments) = split_pieces(inner.finish());
                     if let Some(target) = target {
@@ -366,7 +371,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 }
                 "fldSimple" => {
                     let instr = child.attr(ns::W, "instr").unwrap_or("").to_string();
-                    let mut inner = InlineWalker::new(self.ctx, self.base);
+                    let mut inner = InlineWalker::new(self.ctx, self.base, self.heading);
                     inner.walk(child)?;
                     let (content, attachments) = split_pieces(inner.finish());
                     self.push_field_result(&instr, content);
@@ -416,8 +421,23 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                     None => Default::default(),
                 };
                 let with_char = char_parity.apply_over(self.base);
-                rpr_delta(rpr).apply(with_char)
+                let direct = rpr_delta(rpr);
+                if self.heading {
+                    // Heading typography is structural. Character-style
+                    // toggles and direct rPr are source-explicit run layers;
+                    // normalize only those layers into the inline style.
+                    let character = StyleDelta {
+                        bold: char_parity.bold.then_some(with_char.bold),
+                        italic: char_parity.italic.then_some(with_char.italic),
+                        strike: char_parity.strike.then_some(with_char.strike),
+                        code: None,
+                    };
+                    character.merge(direct).resolve()
+                } else {
+                    direct.apply(with_char)
+                }
             }
+            None if self.heading => Style::PLAIN,
             None => self.base,
         };
         self.walk_run_content(run, style)
