@@ -5,7 +5,8 @@ use crate::model::{ImageSource, Inline};
 use crate::package::Package;
 use crate::package::path::resolve;
 use crate::package::relationships::{
-    Relationships, TargetMode, read_rels, rel_type, rels_part_for,
+    RelationshipPart, Relationships, TargetMode, read_relationship_part, read_rels, rel_type,
+    rels_part_for,
 };
 use crate::package::xml::{Element, ns};
 use crate::shared::assets::{AssetSink, rel_image_source};
@@ -28,10 +29,32 @@ pub(super) struct SheetImage {
     /// Absolute zero-based worksheet anchor. `None` is an absolute anchor,
     /// which belongs to the sheet but carries no honest cell coordinate.
     pub anchor: Option<(u32, u32)>,
-    pub inline: Inline,
+    pub alt: String,
+    pub source: ImageSource,
+}
+
+impl SheetImage {
+    pub fn into_inline(self) -> Inline {
+        Inline::Image { alt: self.alt, source: self.source }
+    }
+}
+
+pub(super) struct XlsxImageUnit {
+    pub name: Option<String>,
+    pub asset_ids: Vec<crate::model::AssetId>,
+    pub degraded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum XlsxImageAvailability {
+    Available,
+    UnsupportedBinary,
+    Unavailable,
 }
 
 pub(super) struct XlsxImages {
+    pub availability: XlsxImageAvailability,
+    pub units: Vec<XlsxImageUnit>,
     pub by_sheet: HashMap<String, Vec<SheetImage>>,
     /// Sheets whose drawing graph existed but could not be read completely.
     pub degraded_sheets: HashSet<String>,
@@ -42,30 +65,37 @@ pub(super) struct XlsxImages {
 /// read passes through `Package`, so archive/XML limits apply before bytes are
 /// retained by `AssetSink`. Other Calamine containers return no drawings.
 pub(super) fn xlsx_images(bytes: &[u8]) -> Result<XlsxImages, ConvertError> {
-    let mut images = HashMap::new();
+    let mut units = Vec::new();
+    let mut by_sheet = HashMap::new();
     let mut degraded_sheets = HashSet::new();
     let assets = RefCell::new(AssetSink::new());
     if !bytes.starts_with(b"PK\x03\x04") {
-        return Ok(XlsxImages { by_sheet: images, degraded_sheets, assets: assets.into_inner() });
+        return Ok(XlsxImages {
+            availability: XlsxImageAvailability::UnsupportedBinary,
+            units,
+            by_sheet,
+            degraded_sheets,
+            assets: assets.into_inner(),
+        });
     }
     let pkg = RefCell::new(Package::open(bytes)?);
     let package_rels = read_rels(&mut pkg.borrow_mut(), "_rels/.rels")?;
-    let Some(workbook_rel) = package_rels
+    let workbook_part = package_rels
         .iter()
         .filter(|(_, rel)| {
             rel.mode == TargetMode::Internal && rel.rel_type == rel_type::OFFICE_DOCUMENT
         })
         .min_by_key(|(id, _)| *id)
         .map(|(_, rel)| rel)
-    else {
-        return Ok(XlsxImages { by_sheet: images, degraded_sheets, assets: assets.into_inner() });
-    };
-    let workbook_part = match resolve("", &workbook_rel.target) {
-        Ok(target) if target.path.ends_with(".xml") => target.path,
-        Ok(_) => {
-            // XLSB has a binary workbook part.
+        .map(|rel| resolve("", &rel.target))
+        .transpose();
+    let workbook_part = match workbook_part {
+        Ok(Some(target)) => target.path,
+        Ok(None) => {
             return Ok(XlsxImages {
-                by_sheet: images,
+                availability: XlsxImageAvailability::Unavailable,
+                units,
+                by_sheet,
                 degraded_sheets,
                 assets: assets.into_inner(),
             });
@@ -73,45 +103,76 @@ pub(super) fn xlsx_images(bytes: &[u8]) -> Result<XlsxImages, ConvertError> {
         Err(e) => {
             log::warn!("skipping unresolvable workbook target: {e}");
             return Ok(XlsxImages {
-                by_sheet: images,
+                availability: XlsxImageAvailability::Unavailable,
+                units,
+                by_sheet,
                 degraded_sheets,
                 assets: assets.into_inner(),
             });
         }
     };
+    if !workbook_part.ends_with(".xml") {
+        return Ok(XlsxImages {
+            availability: XlsxImageAvailability::UnsupportedBinary,
+            units,
+            by_sheet,
+            degraded_sheets,
+            assets: assets.into_inner(),
+        });
+    }
     let Some(workbook) = pkg.borrow_mut().optional_xml_part(&workbook_part)? else {
-        return Ok(XlsxImages { by_sheet: images, degraded_sheets, assets: assets.into_inner() });
+        return Ok(XlsxImages {
+            availability: XlsxImageAvailability::Unavailable,
+            units,
+            by_sheet,
+            degraded_sheets,
+            assets: assets.into_inner(),
+        });
     };
     let workbook_rels = read_rels(&mut pkg.borrow_mut(), &rels_part_for(&workbook_part))?;
     for sheet in workbook.descendants(SPREADSHEET_NS, "sheet") {
-        let Some(name) = sheet.attr(SPREADSHEET_NS, "name") else {
-            continue;
-        };
-        let Some(rel_id) = sheet.attr_qualified(ns::R, "id") else {
-            continue;
-        };
-        let Some(sheet_rel) = workbook_rels.get(rel_id) else {
-            continue;
-        };
-        if sheet_rel.mode != TargetMode::Internal || sheet_rel.rel_type != WORKSHEET_REL {
-            continue;
-        }
-        let sheet_part = match resolve(&workbook_part, &sheet_rel.target) {
-            Ok(target) => target.path,
-            Err(e) => {
-                log::warn!("skipping unresolvable worksheet target {:?}: {e}", sheet_rel.target);
-                continue;
+        let name = sheet.attr(SPREADSHEET_NS, "name").map(str::to_string);
+        let sheet_target = name.as_ref().and_then(|_| {
+            sheet
+                .attr_qualified(ns::R, "id")
+                .and_then(|rel_id| workbook_rels.get(rel_id))
+                .filter(|rel| rel.mode == TargetMode::Internal && rel.rel_type == WORKSHEET_REL)
+                .map(|rel| resolve(&workbook_part, &rel.target))
+        });
+        let legacy_target = sheet_target.is_some();
+        let (images, degraded) = match sheet_target {
+            Some(Ok(target)) => read_sheet_images(&pkg, &target.path, &assets)?,
+            Some(Err(e)) => {
+                log::warn!("skipping unresolvable worksheet target: {e}");
+                (Vec::new(), true)
             }
+            None => (Vec::new(), true),
         };
-        let (sheet_images, degraded) = read_sheet_images(&pkg, &sheet_part, &assets)?;
-        if !sheet_images.is_empty() {
-            images.entry(name.to_string()).or_insert_with(Vec::new).extend(sheet_images);
+        let mut seen = HashSet::new();
+        let asset_ids = images
+            .iter()
+            .filter_map(|image| match image.source {
+                ImageSource::Asset(id) if seen.insert(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        if let Some(name) = &name {
+            if !images.is_empty() {
+                by_sheet.entry(name.clone()).or_insert_with(Vec::new).extend(images);
+            }
+            if degraded && legacy_target {
+                degraded_sheets.insert(name.clone());
+            }
         }
-        if degraded {
-            degraded_sheets.insert(name.to_string());
-        }
+        units.push(XlsxImageUnit { name, asset_ids, degraded });
     }
-    Ok(XlsxImages { by_sheet: images, degraded_sheets, assets: assets.into_inner() })
+    Ok(XlsxImages {
+        availability: XlsxImageAvailability::Available,
+        units,
+        by_sheet,
+        degraded_sheets,
+        assets: assets.into_inner(),
+    })
 }
 
 fn read_sheet_images(
@@ -119,7 +180,12 @@ fn read_sheet_images(
     sheet_part: &str,
     assets: &RefCell<AssetSink>,
 ) -> Result<(Vec<SheetImage>, bool), ConvertError> {
-    let sheet_rels = read_rels(&mut pkg.borrow_mut(), &rels_part_for(sheet_part))?;
+    let sheet_rels =
+        match read_relationship_part(&mut pkg.borrow_mut(), &rels_part_for(sheet_part))? {
+            RelationshipPart::Absent => return Ok((Vec::new(), false)),
+            RelationshipPart::Unreadable => return Ok((Vec::new(), true)),
+            RelationshipPart::Parsed(rels) => rels,
+        };
     // Most sheets have no drawings. Check the small relationships part first
     // so the common path does not decompress and DOM-parse the large worksheet
     // a second time after Calamine has already read its cells.
@@ -224,5 +290,5 @@ fn drawing_image(
         let col = from.find(SPREADSHEET_DRAWING_NS, "col")?.text().trim().parse().ok()?;
         Some((row, col))
     });
-    Ok((Some(SheetImage { anchor, inline: Inline::Image { alt, source } }), degraded))
+    Ok((Some(SheetImage { anchor, alt, source }), degraded))
 }

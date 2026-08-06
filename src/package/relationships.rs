@@ -38,6 +38,15 @@ pub struct Relationship {
 #[derive(Debug, Default)]
 pub struct Relationships(HashMap<String, Relationship>);
 
+/// Outcome of reading an optional relationships part. Most format frontends
+/// treat absence and corruption alike, but compact provenance surfaces need to
+/// distinguish "there were no relationships" from "relationships were lost".
+pub(crate) enum RelationshipPart {
+    Absent,
+    Unreadable,
+    Parsed(Relationships),
+}
+
 impl Relationships {
     pub fn get(&self, id: &str) -> Option<&Relationship> {
         self.0.get(id)
@@ -68,8 +77,22 @@ impl Relationships {
 /// the rest degrade per the unified policy with a log). Resource-limit
 /// errors always propagate.
 pub fn read_rels(pkg: &mut Package, part: &str) -> Result<Relationships, ConvertError> {
+    match read_relationship_part(pkg, part)? {
+        RelationshipPart::Parsed(rels) => Ok(rels),
+        RelationshipPart::Absent | RelationshipPart::Unreadable => Ok(Relationships::default()),
+    }
+}
+
+/// Read an optional relationships part without erasing whether a present part
+/// was unreadable. Resource-limit errors still propagate from the package
+/// layer; malformed optional XML has already been logged there.
+pub(crate) fn read_relationship_part(
+    pkg: &mut Package,
+    part: &str,
+) -> Result<RelationshipPart, ConvertError> {
+    let present = pkg.has_part(part);
     let Some(root) = pkg.optional_xml_part(part)? else {
-        return Ok(Relationships::default());
+        return Ok(if present { RelationshipPart::Unreadable } else { RelationshipPart::Absent });
     };
     let mut map = HashMap::new();
     for rel in root.descendants(ns::PKG_RELS, "Relationship") {
@@ -84,7 +107,7 @@ pub fn read_rels(pkg: &mut Package, part: &str) -> Result<Relationships, Convert
         let rel_type = normalize_ooxml_uri(rel_type).unwrap_or_else(|| rel_type.to_string());
         map.insert(id.to_string(), Relationship { target: target.to_string(), rel_type, mode });
     }
-    Ok(Relationships(map))
+    Ok(RelationshipPart::Parsed(Relationships(map)))
 }
 
 /// A loaded internal relationship target: its resolved part path and bytes.

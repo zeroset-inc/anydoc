@@ -9,7 +9,9 @@ use crate::model::{
 use crate::package::Package;
 use crate::package::relationships::{RelTarget, Relationships, TargetMode, rel_target_bytes};
 use crate::package::xml::{Element, ns};
+use crate::shared::delta::StyleDelta;
 use crate::shared::fields::{FieldFrame, field_result};
+use crate::shared::header::resolve_header_rows;
 use crate::shared::list::{ListEntry, ListKey, flush_list};
 use crate::shared::text::{clean_text, is_xml_space};
 use std::cell::RefCell;
@@ -209,6 +211,14 @@ fn parse_paragraph(p: &Element, ctx: &Ctx) -> Result<(ParaKind, Vec<Piece>), Con
     // heading advances its sequence and keeps its number visible.
     let numbering = resolve_numbering(ppr, pstyle_id, ctx)?;
 
+    // Toggle properties: the paragraph style chain's true-parity flips the
+    // docDefaults base. Headings use the same resolution as body text.
+    let parity = match pstyle_id {
+        Some(id) => ctx.styles.run_toggles(id)?,
+        None => Default::default(),
+    };
+    let paragraph_level = parity.apply_over(ctx.styles.doc_defaults);
+
     let kind = match heading {
         Some(level) => {
             let label = match &numbering {
@@ -225,15 +235,7 @@ fn parse_paragraph(p: &Element, ctx: &Ctx) -> Result<(ParaKind, Vec<Piece>), Con
         },
     };
 
-    // Toggle properties: the paragraph style chain's true-parity flips the
-    // docDefaults base. Headings use the same resolution as body text.
-    let parity = match pstyle_id {
-        Some(id) => ctx.styles.run_toggles(id)?,
-        None => Default::default(),
-    };
-    let paragraph_level = parity.apply_over(ctx.styles.doc_defaults);
-
-    let mut walker = InlineWalker::new(ctx, paragraph_level);
+    let mut walker = InlineWalker::new(ctx, paragraph_level, heading.is_some());
     walker.walk(p)?;
     Ok((kind, walker.finish()))
 }
@@ -300,14 +302,22 @@ fn resolve_numbering(
 struct InlineWalker<'a, 'b, 'e> {
     ctx: &'e Ctx<'a, 'b>,
     base: Style,
+    heading: bool,
     pieces: Vec<Piece>,
     current: Vec<Inline>,
     fields: Vec<FieldFrame>,
 }
 
 impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
-    fn new(ctx: &'e Ctx<'a, 'b>, base: Style) -> Self {
-        InlineWalker { ctx, base, pieces: Vec::new(), current: Vec::new(), fields: Vec::new() }
+    fn new(ctx: &'e Ctx<'a, 'b>, base: Style, heading: bool) -> Self {
+        InlineWalker {
+            ctx,
+            base,
+            heading,
+            pieces: Vec::new(),
+            current: Vec::new(),
+            fields: Vec::new(),
+        }
     }
 
     fn push(&mut self, inline: Inline) {
@@ -345,7 +355,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 "r" => self.walk_run(child)?,
                 "hyperlink" => {
                     let target = self.hyperlink_link_target(child);
-                    let mut inner = InlineWalker::new(self.ctx, self.base);
+                    let mut inner = InlineWalker::new(self.ctx, self.base, self.heading);
                     inner.walk(child)?;
                     let (content, attachments) = split_pieces(inner.finish());
                     if let Some(target) = target {
@@ -361,7 +371,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 }
                 "fldSimple" => {
                     let instr = child.attr(ns::W, "instr").unwrap_or("").to_string();
-                    let mut inner = InlineWalker::new(self.ctx, self.base);
+                    let mut inner = InlineWalker::new(self.ctx, self.base, self.heading);
                     inner.walk(child)?;
                     let (content, attachments) = split_pieces(inner.finish());
                     self.push_field_result(&instr, content);
@@ -411,8 +421,23 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                     None => Default::default(),
                 };
                 let with_char = char_parity.apply_over(self.base);
-                rpr_delta(rpr).apply(with_char)
+                let direct = rpr_delta(rpr);
+                if self.heading {
+                    // Heading typography is structural. Character-style
+                    // toggles and direct rPr are source-explicit run layers;
+                    // normalize only those layers into the inline style.
+                    let character = StyleDelta {
+                        bold: char_parity.bold.then_some(with_char.bold),
+                        italic: char_parity.italic.then_some(with_char.italic),
+                        strike: char_parity.strike.then_some(with_char.strike),
+                        code: None,
+                    };
+                    character.merge(direct).resolve()
+                } else {
+                    direct.apply(with_char)
+                }
             }
+            None if self.heading => Style::PLAIN,
             None => self.base,
         };
         self.walk_run_content(run, style)
@@ -451,11 +476,11 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                     }
                 }
                 "tab" | "ptab" => self.push(Inline::Text { text: " ".into(), style: Style::PLAIN }),
-                "br" => {
-                    if child.attr(ns::W, "type") != Some("page") {
-                        self.push(Inline::LineBreak);
-                    }
-                }
+                // Markdown has no pages or columns, but every w:br still
+                // separates the runs around it: dropping a page break
+                // outright would join the words on either side. One left at
+                // the end of a paragraph is trimmed when the block renders.
+                "br" => self.push(Inline::LineBreak),
                 "cr" => self.push(Inline::LineBreak),
                 "footnoteReference" => {
                     if let Some(id) = child.attr(ns::W, "id") {
@@ -766,7 +791,7 @@ pub(super) fn parse_table(tbl: &Element, ctx: &Ctx) -> Result<Vec<Block>, Conver
     if table.grid.is_empty() {
         return Ok(Vec::new());
     }
-    table.header_rows = header_rows;
+    table.header_rows = resolve_header_rows(&table, header_rows);
     Ok(vec![Block::Table(table)])
 }
 

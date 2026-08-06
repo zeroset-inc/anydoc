@@ -2,7 +2,7 @@
 //! either explicitly on, explicitly off, or unset (inherit); only after the
 //! full cascade is a delta collapsed into the model's resolved [`Style`].
 
-use crate::model::Style;
+use crate::model::{Inline, Style};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StyleDelta {
@@ -35,6 +35,26 @@ impl StyleDelta {
 
     pub fn resolve(self) -> Style {
         self.apply(Style::PLAIN)
+    }
+}
+
+/// Subtract structural heading emphasis in frontends whose serialized run
+/// stream does not retain enough provenance to distinguish a style value
+/// from an exporter restating that same value (binary DOC and RTF).
+pub fn rebase_emphasis(inlines: &mut [Inline], base: Style) {
+    if base == Style::PLAIN {
+        return;
+    }
+    for inline in inlines {
+        match inline {
+            Inline::Text { style, .. } => {
+                style.bold &= !base.bold;
+                style.italic &= !base.italic;
+                style.strike &= !base.strike;
+            }
+            Inline::Link { content, .. } => rebase_emphasis(content, base),
+            _ => {}
+        }
     }
 }
 

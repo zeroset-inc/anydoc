@@ -68,7 +68,12 @@ fn parse_block_elem(
                     .attr(ns::TEXT, "outline-level")
                     .and_then(|v| v.parse::<u8>().ok())
                     .unwrap_or(1);
-                let (inlines, boxes) = parse_inline_content(elem, ctx)?;
+                // Resolve the paragraph chain even though its typography is
+                // structural, preserving cycle/resource validation.
+                paragraph_base(elem, ctx)?;
+                // Paragraph/heading typography is structural; only styles
+                // selected by descendants become inline emphasis.
+                let (inlines, boxes) = parse_inline_content_from(elem, ctx, StyleDelta::default())?;
                 if !inlines_are_empty(&inlines) {
                     let mut content = inlines;
                     // ODF outline links target headings by their text; carry
@@ -270,12 +275,25 @@ fn parse_inline_content(
     elem: &Element,
     ctx: &Ctx,
 ) -> Result<(Vec<Inline>, Vec<Block>), ConvertError> {
-    // An unstyled paragraph still sits on the family's default style.
-    let base = ctx.styles.delta("paragraph", elem.attr(ns::TEXT, "style-name").unwrap_or(""))?;
+    let base = paragraph_base(elem, ctx)?;
+    parse_inline_content_from(elem, ctx, base)
+}
+
+fn parse_inline_content_from(
+    elem: &Element,
+    ctx: &Ctx,
+    base: StyleDelta,
+) -> Result<(Vec<Inline>, Vec<Block>), ConvertError> {
     let mut out = Vec::new();
     let mut boxes = Vec::new();
     walk_inlines(elem, ctx, base, &mut out, &mut boxes)?;
     Ok((out, boxes))
+}
+
+/// The style a paragraph's runs cascade from. An unstyled paragraph still sits
+/// on the family's default style.
+fn paragraph_base(elem: &Element, ctx: &Ctx) -> Result<StyleDelta, ConvertError> {
+    ctx.styles.delta("paragraph", elem.attr(ns::TEXT, "style-name").unwrap_or(""))
 }
 
 fn walk_inlines(

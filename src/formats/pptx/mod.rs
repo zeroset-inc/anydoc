@@ -17,6 +17,7 @@ use crate::package::xml::{Element, ns, parse_xml};
 use crate::package::{Package, archive::probe_ole, path};
 use crate::shared::assets::AssetSink;
 use crate::shared::fields::classify_rel_target;
+use crate::shared::header::resolve_header_rows;
 use crate::shared::list::{ListEntry, ListKey, MarkerKind, flush_list};
 use crate::shared::text::clean_text;
 use cascade::{Bullet, LevelStyle, Placeholder, TextProps, TitleClass};
@@ -428,32 +429,25 @@ fn parse_shape(sp: &Element, ctx: &SlideCtx, blocks: &mut Vec<Block>) -> Result<
     };
     // Titles get heading semantics but keep their shape-order position.
     if ph.as_ref().is_some_and(|p| cascade::title_class(&p.ph_type) == TitleClass::Title) {
-        push_title_heading(tx, ctx, ph.as_ref(), blocks)?;
+        push_title_heading(tx, ctx, blocks)?;
     } else {
         parse_text_body(tx, ctx, ph.as_ref(), blocks)?;
     }
     Ok(())
 }
 
-/// Collapse a title placeholder's paragraphs into one slide heading. Runs
-/// resolve through the full cascade like body text.
+/// Collapse a title placeholder's paragraphs into one slide heading.
 fn push_title_heading(
     tx: &Element,
     ctx: &SlideCtx,
-    ph: Option<&PhInfo>,
     blocks: &mut Vec<Block>,
 ) -> Result<(), ConvertError> {
-    let shape_styles = cascade::parse_level_styles(tx.find(ns::A, "lstStyle"));
     let mut inlines: Vec<Inline> = Vec::new();
     for p in tx.find_all(ns::A, "p") {
-        let ppr = p.find(ns::A, "pPr");
-        let lvl: usize =
-            ppr.and_then(|pr| pr.attr(ns::A, "lvl")).and_then(|v| v.parse().ok()).unwrap_or(0);
-        let mut props = ctx.base_props(ph, &shape_styles, lvl);
-        if let Some(ppr) = ppr {
-            props = props.merge(cascade::paragraph_props(ppr));
-        }
-        let para = parse_para_inlines(p, ctx, props.delta.resolve());
+        // Placeholder/master typography belongs to the heading block. Run
+        // properties are absolute, so applying them over PLAIN retains only
+        // source-explicit inline emphasis.
+        let para = parse_para_inlines(p, ctx, Style::PLAIN);
         if inlines_are_empty(&para) {
             continue;
         }
@@ -661,7 +655,67 @@ fn parse_table(tbl: &Element, ctx: &SlideCtx, blocks: &mut Vec<Block>) -> Result
     if table.grid.is_empty() {
         return Ok(());
     }
-    table.header_rows = header_rows;
+    table.header_rows = resolve_header_rows(&table, header_rows);
     blocks.push(Block::Table(table));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    fn pptx(parts: &[(&str, &str)]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, body) in parts {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(body.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn title_defaults_are_structural_but_direct_run_emphasis_survives() {
+        let presentation = r#"<p:presentation
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst>
+        </p:presentation>"#;
+        let relationships = r#"<Relationships
+            xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId1"
+                Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
+                Target="slides/slide1.xml"/>
+        </Relationships>"#;
+        let slide = r#"<p:sld
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <p:cSld><p:spTree><p:sp>
+                <p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+                <p:txBody><a:bodyPr/><a:lstStyle/><a:p>
+                    <a:pPr><a:defRPr b="1"/></a:pPr>
+                    <a:r><a:t>plain</a:t></a:r>
+                    <a:r><a:rPr b="1"/><a:t> explicit</a:t></a:r>
+                </a:p></p:txBody>
+            </p:sp></p:spTree></p:cSld>
+        </p:sld>"#;
+        let doc = parse(&pptx(&[
+            ("ppt/presentation.xml", presentation),
+            ("ppt/_rels/presentation.xml.rels", relationships),
+            ("ppt/slides/slide1.xml", slide),
+        ]))
+        .unwrap();
+        let Some(Block::Heading { content, .. }) = doc.blocks.first() else {
+            panic!("expected heading: {:?}", doc.blocks)
+        };
+        let styles: Vec<Style> = content
+            .iter()
+            .filter_map(|inline| match inline {
+                Inline::Text { style, .. } => Some(*style),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(styles, vec![Style::PLAIN, Style { bold: true, ..Style::PLAIN }]);
+    }
 }

@@ -607,8 +607,16 @@ impl Extractor {
         for c in shape.text.chars() {
             let d = level_default(para_props(para_run).0);
             let style = Style {
-                bold: char_run.and_then(|r| r.bold).or(d.bold).unwrap_or(false),
-                italic: char_run.and_then(|r| r.italic).or(d.italic).unwrap_or(false),
+                // A title's master/level defaults are structural heading
+                // typography; only character-run exceptions become inline.
+                bold: char_run
+                    .and_then(|r| r.bold)
+                    .or(if is_title { None } else { d.bold })
+                    .unwrap_or(false),
+                italic: char_run
+                    .and_then(|r| r.italic)
+                    .or(if is_title { None } else { d.italic })
+                    .unwrap_or(false),
                 strike: false,
                 code: false,
             };
