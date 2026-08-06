@@ -46,6 +46,21 @@ markdown = document.markdown
 for part in document.rendered_parts:
     blocks = document.blocks[part.start_block : part.end_block]
     assets = [document.assets[asset_id] for asset_id in part.asset_ids]
+
+# Skip the Python document graph when only rendered text and provenance are
+# needed:
+rendered = anydoc.to_rendered_parts(data)
+for part in rendered.parts:
+    source = (
+        rendered.source_units[part.source_unit_index]
+        if part.source_unit_index is not None
+        else None
+    )
+
+# Read bounded XLSX/XLSM image ownership without parsing spreadsheet cells:
+manifest = anydoc.extract_spreadsheet_assets(xlsx_data)
+for sheet in manifest.source_units:
+    images = [manifest.assets[asset_id] for asset_id in sheet.asset_ids]
 ```
 
 ## Errors

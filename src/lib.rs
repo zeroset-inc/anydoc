@@ -7,6 +7,7 @@
 #![warn(missing_docs)]
 
 pub mod model;
+pub mod spreadsheet;
 
 mod error;
 mod formats;
@@ -15,7 +16,9 @@ mod render;
 mod shared;
 
 pub use error::ConvertError;
-pub use render::markdown::{RenderedDocument, RenderedPart, render_document};
+pub use render::markdown::{
+    RenderedDocument, RenderedPart, render_document, render_document_parts,
+};
 
 use render::markdown::document_to_markdown;
 
@@ -136,6 +139,25 @@ pub fn to_document(
     format: impl Into<Option<Format>>,
 ) -> Result<model::Document, ConvertError> {
     formats::parse(bytes, resolve_format(bytes, format.into())?)
+}
+
+/// Extract spreadsheet sheet provenance and embedded DrawingML assets without
+/// parsing cells or rendering tables and Markdown.
+///
+/// OOXML XLSX/XLSM packages are traversed through the same bounded package
+/// layer as full conversion. Binary XLS/XLSB return an explicit unsupported
+/// manifest because their drawing ownership is unavailable without the cell
+/// parser.
+pub fn extract_spreadsheet_assets(
+    bytes: &[u8],
+) -> Result<spreadsheet::SpreadsheetAssetManifest, ConvertError> {
+    match Format::from_bytes(bytes) {
+        Some(Format::Excel) => formats::sheet::extract_assets(bytes),
+        None if bytes.starts_with(b"PK\x03\x04") => formats::sheet::extract_assets(bytes),
+        _ => Err(ConvertError::Unsupported(
+            "input is not a recognized Excel spreadsheet".to_string(),
+        )),
+    }
 }
 
 fn resolve_format(bytes: &[u8], format: Option<Format>) -> Result<Format, ConvertError> {

@@ -75,8 +75,18 @@ pub fn render_document(doc: &Document) -> RenderedDocument {
     let rc = Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc) };
     RenderedDocument {
         markdown: render_document_markdown(doc, &rc),
-        parts: render_document_parts(doc, &rc),
+        parts: render_document_parts_with_context(doc, &rc),
     }
+}
+
+/// Render only the ordered Markdown/provenance parts of a parsed document.
+///
+/// Unlike [`render_document`], this does not build the complete Markdown
+/// string. Note definitions and assets without source-unit ownership remain
+/// in the trailing unowned part.
+pub fn render_document_parts(doc: &Document) -> Vec<RenderedPart> {
+    let rc = Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc) };
+    render_document_parts_with_context(doc, &rc)
 }
 
 fn valid_source_units(doc: &Document) -> Vec<(usize, &crate::model::SourceUnit)> {
@@ -192,7 +202,7 @@ fn finish_markdown(mut out: String) -> String {
     out
 }
 
-fn render_document_parts(doc: &Document, rc: &Ctx) -> Vec<RenderedPart> {
+fn render_document_parts_with_context(doc: &Document, rc: &Ctx) -> Vec<RenderedPart> {
     let units = valid_source_units(doc);
     let mut parts = Vec::new();
     let mut referenced_assets = HashSet::new();

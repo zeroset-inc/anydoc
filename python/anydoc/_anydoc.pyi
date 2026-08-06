@@ -71,6 +71,15 @@ def to_document(data: bytes | bytearray, format: Format | None = None) -> Docume
     Unsupported for `pdf`: PDF conversion produces Markdown directly and has
     no document-model form; use `to_markdown_bytes`."""
 
+def to_rendered_parts(data: bytes | bytearray, format: Format | None = None) -> RenderedParts:
+    """Parse and render only ordered Markdown/provenance parts. The full
+    document model, complete Markdown string, and embedded asset bytes are not
+    converted into Python objects."""
+
+def extract_spreadsheet_assets(data: bytes | bytearray) -> SpreadsheetAssetManifest:
+    """Extract ordered spreadsheet sheet provenance and embedded DrawingML
+    assets without parsing cells or rendering tables and Markdown."""
+
 @final
 class Document:
     markdown: str
@@ -85,6 +94,14 @@ class Document:
     """Footnote and endnote bodies, referenced from text by a `note_ref`
     inline."""
     assets: list[Asset]
+
+@final
+class RenderedParts:
+    """Ordered rendered parts and source-unit provenance without the full
+    document model."""
+
+    parts: list[RenderedPart]
+    source_units: list[SourceUnit]
 
 @final
 class RenderedPart:
@@ -114,6 +131,29 @@ class SourceUnit:
     """Stable machine-readable explanation when skipped."""
     start_block: int
     end_block: int
+
+@final
+class SpreadsheetAssetManifest:
+    """Compact spreadsheet source-unit and embedded-asset manifest."""
+
+    availability: Literal["available", "unsupported"]
+    reason: str | None
+    """Stable machine-readable explanation when unsupported."""
+    source_units: list[SpreadsheetAssetSourceUnit]
+    assets: list[Asset]
+
+@final
+class SpreadsheetAssetSourceUnit:
+    """Embedded assets owned by one workbook sheet."""
+
+    ordinal: int
+    """One-based position in workbook order."""
+    name: str | None
+    status: Literal["complete", "degraded"]
+    reason: str | None
+    """Stable machine-readable explanation when degraded."""
+    asset_ids: list[int]
+    """Distinct retained asset ids referenced by this sheet."""
 
 @final
 class Block:

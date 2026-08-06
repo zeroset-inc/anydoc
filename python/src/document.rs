@@ -27,6 +27,16 @@ pub struct Document {
     assets: Py<PyList>,
 }
 
+/// Ordered rendered parts and source-unit provenance without the document
+/// model that produced them.
+#[pyclass(frozen, get_all, module = "anydoc")]
+pub struct RenderedParts {
+    /// list[RenderedPart]
+    parts: Py<PyList>,
+    /// list[SourceUnit]
+    source_units: Py<PyList>,
+}
+
 /// Markdown and provenance for one ordered range of a document.
 #[pyclass(frozen, get_all, module = "anydoc")]
 pub struct RenderedPart {
@@ -425,12 +435,23 @@ pub struct Asset {
     data: Py<PyBytes>,
 }
 
-fn asset(py: Python<'_>, asset: model::Asset) -> PyResult<Asset> {
+pub(crate) fn asset(py: Python<'_>, asset: model::Asset) -> PyResult<Asset> {
     Ok(Asset {
         id: asset.id.0,
         media_type: asset.media_type,
         origin_part: asset.origin_part,
         data: PyBytes::new(py, &asset.bytes).unbind(),
+    })
+}
+
+pub fn rendered_parts(
+    py: Python<'_>,
+    parts: Vec<anydoc::RenderedPart>,
+    source_units: Vec<model::SourceUnit>,
+) -> PyResult<RenderedParts> {
+    Ok(RenderedParts {
+        parts: pylist(py, parts.into_iter().map(|part| rendered_part(py, part)))?,
+        source_units: pylist(py, source_units.into_iter().map(|unit| Ok(source_unit(unit))))?,
     })
 }
 
@@ -460,7 +481,7 @@ fn inlines(py: Python<'_>, items: Vec<model::Inline>) -> PyResult<Py<PyList>> {
     pylist(py, items.into_iter().map(|i| inline(py, i)))
 }
 
-fn pylist<'py, T: IntoPyObject<'py>>(
+pub(crate) fn pylist<'py, T: IntoPyObject<'py>>(
     py: Python<'py>,
     items: impl Iterator<Item = PyResult<T>>,
 ) -> PyResult<Py<PyList>> {

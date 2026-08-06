@@ -10,7 +10,7 @@ pub mod pdf;
 mod ppt;
 mod pptx;
 mod rtf;
-mod sheet;
+pub(crate) mod sheet;
 
 use crate::Format;
 use crate::error::ConvertError;

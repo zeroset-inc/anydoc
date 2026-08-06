@@ -10,7 +10,7 @@ use crate::model::{
 use crate::shared::header::resolve_header_rows;
 use crate::shared::text::clean_text;
 use calamine::{Data, Dimensions, Reader, Sheets, open_workbook_auto_from_rs};
-use images::{SheetImage, xlsx_images};
+use images::{SheetImage, XlsxImageAvailability, xlsx_images};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 
@@ -180,7 +180,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
 }
 
 fn append_images(blocks: &mut Vec<Block>, images: Vec<SheetImage>) {
-    blocks.extend(images.into_iter().map(|image| Block::Paragraph(vec![image.inline])));
+    blocks.extend(images.into_iter().map(|image| Block::Paragraph(vec![image.into_inline()])));
 }
 
 /// Place an image into its anchored cell when that cell already exists in the
@@ -211,8 +211,46 @@ fn place_anchored_image(
     else {
         return Err(image);
     };
-    cell.blocks.push(Block::Paragraph(vec![image.inline]));
+    cell.blocks.push(Block::Paragraph(vec![image.into_inline()]));
     Ok(())
+}
+
+pub(crate) fn extract_assets(
+    bytes: &[u8],
+) -> Result<crate::spreadsheet::SpreadsheetAssetManifest, ConvertError> {
+    use crate::spreadsheet::{
+        SpreadsheetAssetAvailability, SpreadsheetAssetSourceUnit, SpreadsheetAssetUnitStatus,
+    };
+
+    let extracted = xlsx_images(bytes)?;
+    let availability = match extracted.availability {
+        XlsxImageAvailability::Available => SpreadsheetAssetAvailability::Available,
+        XlsxImageAvailability::UnsupportedBinary => SpreadsheetAssetAvailability::Unsupported,
+        XlsxImageAvailability::Unavailable => {
+            return Err(ConvertError::malformed("spreadsheet workbook metadata is unreadable"));
+        }
+    };
+    let mut source_units = Vec::with_capacity(extracted.units.len());
+    for (index, unit) in extracted.units.into_iter().enumerate() {
+        source_units.push(SpreadsheetAssetSourceUnit {
+            ordinal: index + 1,
+            name: unit.name,
+            status: if unit.degraded {
+                SpreadsheetAssetUnitStatus::Degraded
+            } else {
+                SpreadsheetAssetUnitStatus::Complete
+            },
+            reason: unit.degraded.then(|| "worksheet_drawing_unreadable".to_string()),
+            asset_ids: unit.asset_ids,
+        });
+    }
+    Ok(crate::spreadsheet::SpreadsheetAssetManifest {
+        availability,
+        reason: (availability == SpreadsheetAssetAvailability::Unsupported)
+            .then(|| "binary_spreadsheet_assets_unsupported".to_string()),
+        source_units,
+        assets: extracted.assets.assets,
+    })
 }
 
 /// Merged regions per sheet, where the container format exposes them (xlsx
@@ -737,6 +775,154 @@ mod tests {
             matches!(err, ConvertError::ResourceLimit { limit: "max_entry_bytes", .. }),
             "expected the package limit, got {err}"
         );
+    }
+
+    #[test]
+    fn compact_assets_keep_order_ownership_and_deduplicate() {
+        let anchors = format!("{}{}", absolute_anchor("One"), absolute_anchor("Two"));
+        let bytes = xlsx_with_images("", None, &anchors, images::IMAGE_REL);
+        let manifest = extract_assets(&bytes).unwrap();
+
+        assert_eq!(
+            manifest.availability,
+            crate::spreadsheet::SpreadsheetAssetAvailability::Available
+        );
+        assert_eq!(manifest.source_units.len(), 1);
+        assert_eq!(manifest.source_units[0].ordinal, 1);
+        assert_eq!(manifest.source_units[0].name.as_deref(), Some("Pictures"));
+        assert_eq!(
+            manifest.source_units[0].status,
+            crate::spreadsheet::SpreadsheetAssetUnitStatus::Complete
+        );
+        assert_eq!(manifest.source_units[0].asset_ids, [crate::model::AssetId(0)]);
+        assert_eq!(manifest.assets.len(), 1, "one package part is retained once");
+        assert_eq!(manifest.assets[0].origin_part, "xl/media/image1.png");
+    }
+
+    #[test]
+    fn compact_assets_retain_recovered_images_and_report_degradation() {
+        let anchors = format!(
+            "{}{}",
+            absolute_anchor("Recovered"),
+            absolute_anchor("Missing").replace("rIdImage", "rIdMissing")
+        );
+        let bytes = xlsx_with_images("", None, &anchors, images::IMAGE_REL);
+        let manifest = extract_assets(&bytes).unwrap();
+
+        assert_eq!(manifest.assets.len(), 1);
+        assert_eq!(manifest.source_units[0].asset_ids, [crate::model::AssetId(0)]);
+        assert_eq!(
+            manifest.source_units[0].status,
+            crate::spreadsheet::SpreadsheetAssetUnitStatus::Degraded
+        );
+        assert_eq!(
+            manifest.source_units[0].reason.as_deref(),
+            Some("worksheet_drawing_unreadable")
+        );
+    }
+
+    #[test]
+    fn compact_assets_include_healthy_sheets_without_images() {
+        let manifest = extract_assets(&xlsx_with_merge("D11:E11")).unwrap();
+
+        assert_eq!(manifest.source_units.len(), 1);
+        assert_eq!(manifest.source_units[0].name.as_deref(), Some("S"));
+        assert_eq!(
+            manifest.source_units[0].status,
+            crate::spreadsheet::SpreadsheetAssetUnitStatus::Complete
+        );
+        assert!(manifest.source_units[0].asset_ids.is_empty());
+        assert!(manifest.assets.is_empty());
+    }
+
+    #[test]
+    fn compact_assets_do_not_enter_the_calamine_cell_path() {
+        let invalid_cell =
+            r#"<row r="1"><c r="not-a-cell" t="inlineStr"><is><t>bad</t></is></c></row>"#;
+        let bytes =
+            xlsx_with_images(invalid_cell, None, &absolute_anchor("Recovered"), images::IMAGE_REL);
+
+        let manifest = crate::extract_spreadsheet_assets(&bytes).unwrap();
+        assert_eq!(manifest.source_units[0].asset_ids, [crate::model::AssetId(0)]);
+        assert_eq!(
+            manifest.source_units[0].status,
+            crate::spreadsheet::SpreadsheetAssetUnitStatus::Complete
+        );
+        let document = parse(&bytes).unwrap();
+        assert_eq!(document.source_units[0].status, SourceUnitStatus::Skipped);
+        assert_eq!(document.source_units[0].reason.as_deref(), Some("worksheet_unreadable"));
+    }
+
+    #[test]
+    fn compact_assets_do_not_retain_unreferenced_media() {
+        let manifest = extract_assets(&xlsx_with_images("", None, "", images::IMAGE_REL)).unwrap();
+
+        assert!(manifest.source_units[0].asset_ids.is_empty());
+        assert!(manifest.assets.is_empty());
+    }
+
+    #[test]
+    fn compact_assets_report_binary_xls_and_xlsb_as_unsupported() {
+        let xls = include_bytes!("../../../tests/fixtures/xls/sheet.xls");
+        let xls_manifest = crate::extract_spreadsheet_assets(xls).unwrap();
+        assert_eq!(
+            xls_manifest.availability,
+            crate::spreadsheet::SpreadsheetAssetAvailability::Unsupported
+        );
+
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, body) in [
+            (
+                "[Content_Types].xml",
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.bin" ContentType="application/vnd.ms-excel.sheet.binary.macroEnabled.main"/></Types>"#.as_slice(),
+            ),
+            (
+                "_rels/.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.bin"/></Relationships>"#.as_slice(),
+            ),
+            ("xl/workbook.bin", b"binary".as_slice()),
+        ] {
+            writer.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            writer.write_all(body).unwrap();
+        }
+        let xlsb = writer.finish().unwrap().into_inner();
+        let xlsb_manifest = crate::extract_spreadsheet_assets(&xlsb).unwrap();
+        assert_eq!(
+            xlsb_manifest.availability,
+            crate::spreadsheet::SpreadsheetAssetAvailability::Unsupported
+        );
+        assert_eq!(xlsb_manifest.reason.as_deref(), Some("binary_spreadsheet_assets_unsupported"));
+        assert!(xlsb_manifest.source_units.is_empty());
+        assert!(xlsb_manifest.assets.is_empty());
+    }
+
+    #[test]
+    fn compact_assets_propagate_package_limits() {
+        let anchor = absolute_anchor("Oversize");
+        let mut bytes = xlsx_with_images("", None, &anchor, images::IMAGE_REL);
+        set_declared_size(
+            &mut bytes,
+            "xl/media/image1.png",
+            (crate::package::limits::MAX_ENTRY_BYTES + 1) as u32,
+        );
+
+        let err = crate::extract_spreadsheet_assets(&bytes).unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: "max_entry_bytes", .. }));
+    }
+
+    #[test]
+    fn compact_assets_reject_unreadable_workbook_metadata() {
+        let bytes = xlsx_with_images("", None, "", images::IMAGE_REL);
+        let bytes = rewrite_zip_part(&bytes, "xl/workbook.xml", None);
+
+        let err = crate::extract_spreadsheet_assets(&bytes).unwrap_err();
+        assert!(matches!(err, ConvertError::Malformed { .. }));
+    }
+
+    #[test]
+    fn compact_assets_report_a_corrupt_zip_as_malformed() {
+        let err = crate::extract_spreadsheet_assets(b"PK\x03\x04truncated").unwrap_err();
+        assert!(matches!(err, ConvertError::Malformed { .. }));
     }
 
     #[test]

@@ -15,6 +15,28 @@ CSV = FIXTURES / "csv" / "sheet.csv"
 PRESENTATION = FIXTURES / "pptx" / "pres.pptx"
 ENCRYPTED = FIXTURES / "malformed" / "encrypted--errors.odt"
 ZIPBOMB = FIXTURES / "abuse" / "zipbomb--errors.docx"
+XLS = FIXTURES / "xls" / "sheet.xls"
+
+
+def _xlsx_with_owned_image() -> bytes:
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, "w") as archive:
+        parts = {
+            "[Content_Types].xml": """<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>""",
+            "_rels/.rels": """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>""",
+            "xl/workbook.xml": """<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Empty" sheetId="1" r:id="rId1"/><sheet name="Pictures" sheetId="2" r:id="rId2"/></sheets></workbook>""",
+            "xl/_rels/workbook.xml.rels": """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>""",
+            "xl/worksheets/sheet1.xml": """<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>""",
+            "xl/worksheets/sheet2.xml": """<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><drawing r:id="rIdDrawing"/></worksheet>""",
+            "xl/worksheets/_rels/sheet2.xml.rels": """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>""",
+            "xl/drawings/drawing1.xml": """<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="1" cy="1"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="1" name="Owned"/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rIdImage"/></xdr:blipFill></xdr:pic></xdr:absoluteAnchor><xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="1" cy="1"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="2" name="Missing"/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rIdMissing"/></xdr:blipFill></xdr:pic></xdr:absoluteAnchor></xdr:wsDr>""",
+            "xl/drawings/_rels/drawing1.xml.rels": """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/owned.png"/></Relationships>""",
+        }
+        for name, body in parts.items():
+            archive.writestr(name, body)
+        archive.writestr("xl/media/owned.png", b"owned-image")
+        archive.writestr("xl/media/unreferenced.png", b"not-content")
+    return package.getvalue()
 
 
 class AnydocTest(unittest.TestCase):
@@ -71,6 +93,95 @@ class AnydocTest(unittest.TestCase):
         self.assertEqual(first_part.start_block, first.start_block)
         self.assertEqual(first_part.end_block, first.end_block)
         self.assertTrue(first_part.markdown)
+
+    def test_to_rendered_parts_matches_document_without_exporting_its_graph(self):
+        data = PRESENTATION.read_bytes()
+        compact = anydoc.to_rendered_parts(data, "pptx")
+        document = anydoc.to_document(data, "pptx")
+
+        self.assertEqual(
+            [
+                (
+                    part.markdown,
+                    part.source_unit_index,
+                    part.start_block,
+                    part.end_block,
+                    part.asset_ids,
+                )
+                for part in compact.parts
+            ],
+            [
+                (
+                    part.markdown,
+                    part.source_unit_index,
+                    part.start_block,
+                    part.end_block,
+                    part.asset_ids,
+                )
+                for part in document.rendered_parts
+            ],
+        )
+        self.assertEqual(
+            [
+                (unit.kind, unit.ordinal, unit.name, unit.status, unit.reason)
+                for unit in compact.source_units
+            ],
+            [
+                (unit.kind, unit.ordinal, unit.name, unit.status, unit.reason)
+                for unit in document.source_units
+            ],
+        )
+        for absent in ("markdown", "blocks", "notes", "assets", "rendered_parts"):
+            self.assertFalse(hasattr(compact, absent), absent)
+
+    def test_to_rendered_parts_preserves_unowned_note_and_asset_parts(self):
+        data = RICH.read_bytes()
+        compact = anydoc.to_rendered_parts(data, "docx")
+        document = anydoc.to_document(data, "docx")
+
+        self.assertEqual(
+            [
+                (part.markdown, part.source_unit_index, part.asset_ids)
+                for part in compact.parts
+            ],
+            [
+                (part.markdown, part.source_unit_index, part.asset_ids)
+                for part in document.rendered_parts
+            ],
+        )
+        self.assertTrue(any(part.source_unit_index is None for part in compact.parts))
+
+    def test_spreadsheet_asset_manifest_is_ordered_bounded_and_explicit(self):
+        manifest = anydoc.extract_spreadsheet_assets(_xlsx_with_owned_image())
+
+        self.assertEqual(manifest.availability, "available")
+        self.assertIsNone(manifest.reason)
+        self.assertEqual(
+            [(unit.ordinal, unit.name) for unit in manifest.source_units],
+            [(1, "Empty"), (2, "Pictures")],
+        )
+        self.assertEqual(manifest.source_units[0].status, "complete")
+        self.assertEqual(manifest.source_units[0].asset_ids, [])
+        self.assertEqual(manifest.source_units[1].status, "degraded")
+        self.assertEqual(
+            manifest.source_units[1].reason,
+            "worksheet_drawing_unreadable",
+        )
+        self.assertEqual(manifest.source_units[1].asset_ids, [0])
+        self.assertEqual(len(manifest.assets), 1)
+        self.assertEqual(manifest.assets[0].origin_part, "xl/media/owned.png")
+        self.assertEqual(manifest.assets[0].data, b"owned-image")
+
+    def test_binary_spreadsheet_assets_are_explicitly_unsupported(self):
+        manifest = anydoc.extract_spreadsheet_assets(XLS.read_bytes())
+
+        self.assertEqual(manifest.availability, "unsupported")
+        self.assertEqual(
+            manifest.reason,
+            "binary_spreadsheet_assets_unsupported",
+        )
+        self.assertEqual(manifest.source_units, [])
+        self.assertEqual(manifest.assets, [])
 
     def test_format_detection_reads_content_extension_and_path(self):
         self.assertEqual(anydoc.format_from_bytes(RICH.read_bytes()), "docx")

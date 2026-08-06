@@ -7,6 +7,7 @@ use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 
 mod document;
+mod spreadsheet;
 
 create_exception!(
     anydoc,
@@ -187,6 +188,40 @@ fn to_document(
     document::document(py, parsed, rendered)
 }
 
+/// Parse and render only ordered Markdown/provenance parts. The full
+/// document model, complete Markdown string, and embedded asset bytes are not
+/// converted into Python objects.
+#[pyfunction]
+#[pyo3(signature = (data, format=None))]
+fn to_rendered_parts(
+    py: Python<'_>,
+    data: Vec<u8>,
+    format: Option<&str>,
+) -> PyResult<document::RenderedParts> {
+    let format = format.map(parse_format).transpose()?;
+    let (parts, source_units) = py
+        .detach(|| {
+            let mut parsed = anydoc::to_document(&data, format)?;
+            let parts = anydoc::render_document_parts(&parsed);
+            Ok::<_, anydoc::ConvertError>((parts, std::mem::take(&mut parsed.source_units)))
+        })
+        .map_err(|e| convert_error(py, e))?;
+    document::rendered_parts(py, parts, source_units)
+}
+
+/// Extract ordered spreadsheet sheet provenance and embedded DrawingML assets
+/// without parsing cells or rendering tables and Markdown.
+#[pyfunction]
+fn extract_spreadsheet_assets(
+    py: Python<'_>,
+    data: Vec<u8>,
+) -> PyResult<spreadsheet::SpreadsheetAssetManifest> {
+    let manifest = py
+        .detach(|| anydoc::extract_spreadsheet_assets(&data))
+        .map_err(|e| convert_error(py, e))?;
+    spreadsheet::manifest(py, manifest)
+}
+
 /// Convert documents to GitHub-Flavored Markdown.
 #[pymodule]
 fn _anydoc(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -196,6 +231,8 @@ fn _anydoc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(to_markdown, m)?)?;
     m.add_function(wrap_pyfunction!(to_markdown_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(to_document, m)?)?;
+    m.add_function(wrap_pyfunction!(to_rendered_parts, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_spreadsheet_assets, m)?)?;
     m.add_class::<document::Asset>()?;
     m.add_class::<document::Block>()?;
     m.add_class::<document::Cell>()?;
@@ -208,9 +245,12 @@ fn _anydoc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<document::ListItem>()?;
     m.add_class::<document::Note>()?;
     m.add_class::<document::RenderedPart>()?;
+    m.add_class::<document::RenderedParts>()?;
     m.add_class::<document::SourceUnit>()?;
     m.add_class::<document::Style>()?;
     m.add_class::<document::Table>()?;
+    m.add_class::<spreadsheet::SpreadsheetAssetManifest>()?;
+    m.add_class::<spreadsheet::SpreadsheetAssetSourceUnit>()?;
     m.add("ConvertError", m.py().get_type::<ConvertError>())?;
     m.add("EncryptedError", m.py().get_type::<EncryptedError>())?;
     m.add("MalformedError", m.py().get_type::<MalformedError>())?;
