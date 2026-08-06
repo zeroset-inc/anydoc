@@ -7,6 +7,7 @@ use crate::model::{
     Block, Cell, CellSlot, Document, GridBuilder, Inline, SourceUnit, SourceUnitKind,
     SourceUnitStatus, Table, TableKind,
 };
+use crate::shared::header::resolve_header_rows;
 use crate::shared::text::clean_text;
 use calamine::{Data, Dimensions, Reader, Sheets, open_workbook_auto_from_rs};
 use images::{SheetImage, xlsx_images};
@@ -128,8 +129,11 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
                 }
             }
         }
-        // Spreadsheet data has no header semantics unless the format says so.
+        // A spreadsheet marks no header row, so the shape of the data decides.
         let mut table = builder.finish(TableKind::Data);
+        if !table.grid.is_empty() {
+            table.header_rows = resolve_header_rows(&table, 0);
+        }
         let mut trailing_images = Vec::new();
         for image in sheet_images {
             if let Err(image) = place_anchored_image(&mut table, start, image) {

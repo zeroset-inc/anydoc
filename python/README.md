@@ -48,6 +48,30 @@ for part in document.rendered_parts:
     assets = [document.assets[asset_id] for asset_id in part.asset_ids]
 ```
 
+## Errors
+
+A conversion raises only when no meaningful Markdown could come out of the file. The exception type names what went wrong:
+
+```python
+try:
+    return anydoc.to_markdown(path)
+except (anydoc.EncryptedError, anydoc.UnsupportedError) as error:
+    # No document comes out of these, so record the file and take the next one.
+    unconverted.append((path, type(error).__name__))
+    return None
+```
+
+| Exception            | Raised when                                                         |
+| -------------------- | ------------------------------------------------------------------- |
+| `UnsupportedError`   | Unknown format, or one that cannot be converted (an image-only PDF) |
+| `MalformedError`     | Structurally unusable: no meaningful content could be extracted     |
+| `EncryptedError`     | Encrypted or password-protected                                     |
+| `ResourceLimitError` | Crossed a fixed safety limit (decompression, nesting, node count)   |
+| `MissingPartError`   | A part required for any meaningful output is absent                 |
+| `OSError`            | The file could not be read, from `to_markdown` only                 |
+
+The five conversion failures subclass `anydoc.ConvertError`, so catching that handles all of them at once. `MalformedError.part` and `MissingPartError.part` name the package part at fault, `ResourceLimitError.limit` names the limit crossed, and `str(error)` carries the whole message. A `format` argument naming no supported format raises `ValueError`.
+
 ## Format detection
 
 The format is read from the file content, using the marker its specification designates: the PDF header, the RTF open group, OLE stream names, the ZIP package mimetype and content types. CSV has no such marker, so detection returns `None` for it and the extension, or an explicit format, names it instead.
