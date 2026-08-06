@@ -4,12 +4,22 @@ on:
   push:
     tags: ['zeroset-v*']
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing zeroset-v* tag to build
+        required: false
+        type: string
+      publish:
+        description: Publish the tested wheels to PyPI
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-zeroset-anydoc-${{ github.ref }}
+  group: release-zeroset-anydoc-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -17,14 +27,80 @@ jobs:
     name: Version gate
     runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
+      commit: ${{ steps.release.outputs.commit }}
+      tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
     steps:
+      - id: release
+        name: Resolve verified release source
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          MANUAL_PUBLISH: ${{ inputs.publish }}
+          MANUAL_RELEASE_TAG: ${{ inputs.release_tag }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const manualPublish = process.env.MANUAL_PUBLISH === 'true'
+            const tagPrefix = 'refs/tags/'
+            let releaseTag
+            if (context.eventName === 'push') {
+              const ref = process.env.GITHUB_REF || ''
+              if (!ref.startsWith(tagPrefix)) {
+                throw new Error(`Release push has unexpected ref: ${ref}`)
+              }
+              releaseTag = ref.slice(tagPrefix.length)
+            } else {
+              releaseTag = process.env.MANUAL_RELEASE_TAG.trim()
+            }
+
+            if (!releaseTag) {
+              if (manualPublish) {
+                throw new Error('A release_tag is required when publishing manually')
+              }
+              core.setOutput('commit', context.sha)
+              core.setOutput('tag', '')
+              return
+            }
+            if (!/^zeroset-v\d+\.\d+\.\d+$/.test(releaseTag)) {
+              throw new Error(`Invalid release tag: ${releaseTag}`)
+            }
+
+            const { data: ref } = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `tags/${releaseTag}`,
+            })
+            if (ref.object.type !== 'tag') {
+              throw new Error(`${releaseTag} is not an annotated tag`)
+            }
+            const { data: tag } = await github.rest.git.getTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_sha: ref.object.sha,
+            })
+            if (tag.object.type !== 'commit') {
+              throw new Error(`${releaseTag} does not point directly to a commit`)
+            }
+            if (!tag.verification?.verified) {
+              throw new Error(
+                `${releaseTag} has no verified signature: ${tag.verification?.reason}`,
+              )
+            }
+            if (context.eventName === 'push' && tag.object.sha !== context.sha) {
+              throw new Error(`${releaseTag} moved after its push event`)
+            }
+            core.setOutput('commit', tag.object.sha)
+            core.setOutput('tag', releaseTag)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.release.outputs.commit }}
       - id: version
         name: Verify package version
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            version=$(sh scripts/check-zeroset-python-version.sh "$GITHUB_REF_NAME")
+          if [ -n "$RELEASE_TAG" ]; then
+            version=$(sh scripts/check-zeroset-python-version.sh "$RELEASE_TAG")
           else
             version=$(sh scripts/check-zeroset-python-version.sh)
           fi
@@ -58,6 +134,8 @@ jobs:
     runs-on: ${{ matrix.host }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         if: runner.os != 'Linux'
         with:
@@ -75,7 +153,7 @@ jobs:
 
   test-wheels:
     name: Test wheel (${{ matrix.target }})
-    needs: build-wheels
+    needs: [gate, build-wheels]
     strategy:
       fail-fast: false
       matrix:
@@ -102,6 +180,8 @@ jobs:
     runs-on: ${{ matrix.host }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         if: ${{ !matrix.image }}
         with:
@@ -131,7 +211,7 @@ jobs:
   publish:
     name: Publish PyPI wheels
     needs: [gate, test-wheels]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
