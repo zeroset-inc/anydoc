@@ -113,6 +113,27 @@ pub(crate) fn read_relationship_part(
 /// A loaded internal relationship target: its resolved part path and bytes.
 pub type RelTarget = (String, Rc<[u8]>);
 
+/// Resolve an internal relationship target without reading its payload.
+pub fn rel_target_path(
+    rels: &Relationships,
+    base_part: &str,
+    rel_id: &str,
+) -> Result<Option<String>, ConvertError> {
+    let Some(rel) = rels.get(rel_id) else {
+        return Ok(None);
+    };
+    if rel.mode != TargetMode::Internal {
+        return Ok(None);
+    }
+    match crate::package::path::resolve(base_part, &rel.target) {
+        Ok(target) => Ok(Some(target.path)),
+        Err(e) => {
+            log::warn!("skipping unresolvable relationship target {:?}: {e}", rel.target);
+            Ok(None)
+        }
+    }
+}
+
 /// Load an internal relationship target's bytes, resolved against the part
 /// the relationship appears in. Unknown ids, external targets, and
 /// unresolvable or unreadable targets degrade (log + `None`) per the unified
@@ -123,23 +144,13 @@ pub fn rel_target_bytes(
     base_part: &str,
     rel_id: &str,
 ) -> Result<Option<RelTarget>, ConvertError> {
-    let Some(rel) = rels.get(rel_id) else {
+    let Some(target) = rel_target_path(rels, base_part, rel_id)? else {
         return Ok(None);
     };
-    if rel.mode != TargetMode::Internal {
-        return Ok(None);
-    }
-    let target = match crate::package::path::resolve(base_part, &rel.target) {
-        Ok(t) => t,
-        Err(e) => {
-            log::warn!("skipping unresolvable relationship target {:?}: {e}", rel.target);
-            return Ok(None);
-        }
-    };
-    match pkg.borrow_mut().optional_part(&target.path)? {
-        Some(bytes) => Ok(Some((target.path, bytes))),
+    match pkg.borrow_mut().optional_part(&target)? {
+        Some(bytes) => Ok(Some((target, bytes))),
         None => {
-            log::warn!("relationship target {} is missing", target.path);
+            log::warn!("relationship target {target} is missing");
             Ok(None)
         }
     }

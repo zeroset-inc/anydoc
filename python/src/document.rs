@@ -422,8 +422,8 @@ fn note(py: Python<'_>, note: model::Note) -> PyResult<Note> {
     })
 }
 
-/// An embedded binary asset (image, object payload). Bytes are always
-/// retained, so a document stays self-contained.
+/// An embedded binary asset (image, object payload), including provenance for
+/// payloads omitted by caller retention policy.
 #[pyclass(frozen, get_all, module = "anydoc")]
 pub struct Asset {
     /// Index into `Document.assets`, as referenced by an image source.
@@ -432,7 +432,18 @@ pub struct Asset {
     media_type: String,
     /// Package part or stream the asset came from, for provenance.
     origin_part: String,
-    data: Py<PyBytes>,
+    byte_len: usize,
+    data: Option<Py<PyBytes>>,
+    /// max_unique_assets, max_total_bytes, max_asset_bytes, or None.
+    omission_reason: Option<&'static str>,
+}
+
+fn omission_reason(reason: model::AssetOmissionReason) -> &'static str {
+    match reason {
+        model::AssetOmissionReason::MaxUniqueAssets => "max_unique_assets",
+        model::AssetOmissionReason::MaxTotalBytes => "max_total_bytes",
+        model::AssetOmissionReason::MaxAssetBytes => "max_asset_bytes",
+    }
 }
 
 pub(crate) fn asset(py: Python<'_>, asset: model::Asset) -> PyResult<Asset> {
@@ -440,7 +451,9 @@ pub(crate) fn asset(py: Python<'_>, asset: model::Asset) -> PyResult<Asset> {
         id: asset.id.0,
         media_type: asset.media_type,
         origin_part: asset.origin_part,
-        data: PyBytes::new(py, &asset.bytes).unbind(),
+        byte_len: asset.byte_len,
+        data: asset.omission_reason.is_none().then(|| PyBytes::new(py, &asset.bytes).unbind()),
+        omission_reason: asset.omission_reason.map(omission_reason),
     })
 }
 

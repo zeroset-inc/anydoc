@@ -16,19 +16,27 @@ use crate::Format;
 use crate::error::ConvertError;
 use crate::model::Document;
 
-pub fn parse(bytes: &[u8], format: Format) -> Result<Document, ConvertError> {
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    format: Format,
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     match format {
-        Format::Excel => sheet::parse(bytes),
+        Format::Excel => sheet::parse_with_asset_policy(bytes, asset_policy),
         Format::Csv => csv::parse(bytes),
-        Format::Docx => docx::parse(bytes),
-        Format::Odt | Format::Ods | Format::Odp => odf::parse(bytes),
-        Format::Pptx => pptx::parse(bytes),
-        Format::Epub => epub::parse(bytes),
-        Format::Rtf => rtf::parse(bytes),
+        Format::Docx => docx::parse_with_asset_policy(bytes, asset_policy),
+        Format::Odt | Format::Ods | Format::Odp => {
+            odf::parse_with_asset_policy(bytes, asset_policy)
+        }
+        Format::Pptx => pptx::parse_with_asset_policy(bytes, asset_policy),
+        Format::Epub => epub::parse_with_asset_policy(bytes, asset_policy),
+        Format::Rtf => rtf::parse_with_asset_policy(bytes, asset_policy),
         // RTF files wearing a .doc extension are common in the wild.
-        Format::Doc if bytes.starts_with(b"{\\rtf") => rtf::parse(bytes),
-        Format::Doc => doc::parse(bytes),
-        Format::Ppt => ppt::parse(bytes),
+        Format::Doc if bytes.starts_with(b"{\\rtf") => {
+            rtf::parse_with_asset_policy(bytes, asset_policy)
+        }
+        Format::Doc => doc::parse_with_asset_policy(bytes, asset_policy),
+        Format::Ppt => ppt::parse_with_asset_policy(bytes, asset_policy),
         // pdf-inspector produces Markdown directly; there is no document
         // model for PDFs. `to_markdown_bytes` routes them to `pdf`.
         Format::Pdf => Err(ConvertError::Unsupported(

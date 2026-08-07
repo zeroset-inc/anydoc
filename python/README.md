@@ -61,6 +61,16 @@ for part in rendered.parts:
 manifest = anydoc.extract_spreadsheet_assets(xlsx_data)
 for sheet in manifest.source_units:
     images = [manifest.assets[asset_id] for asset_id in sheet.asset_ids]
+
+# Bound application-level payload retention without losing text, asset ids,
+# or part/sheet provenance. Omitted assets have data=None plus a reason.
+policy = anydoc.AssetRetentionPolicy(
+    max_unique_assets=200,
+    max_total_bytes=32 * 1024 * 1024,
+    max_asset_bytes=32 * 1024 * 1024,
+)
+document = anydoc.to_document(data, asset_policy=policy)
+omitted = [asset for asset in document.assets if asset.data is None]
 ```
 
 ## Errors
@@ -99,7 +109,7 @@ anydoc.format_from_path("report.odt")  # 'odt'
 
 ## Images and embedded objects
 
-Markdown cannot embed bytes, so an embedded image renders as its alt text while the bytes stay on `document.assets`, tagged with a media type and the part they came from. Images that carry an external URL render as ordinary Markdown images. Standard XLSX/XLSM DrawingML images retain their sheet and bounded cell placement.
+Markdown cannot embed bytes, so an embedded image renders as its alt text while its record stays on `document.assets`, tagged with a media type and source part. By default `asset.data` carries the bytes. An `AssetRetentionPolicy` can omit payloads by unique count, aggregate bytes, or individual bytes; the same asset id remains in rendered parts and source units, while `data`, `byte_len`, and `omission_reason` expose the structured outcome. Images that carry an external URL render as ordinary Markdown images. Standard XLSX/XLSM DrawingML images retain their sheet and bounded cell placement.
 
 Presentation slides and spreadsheet sheets are exposed through `document.source_units`. Each unit carries its 1-based ordinal, optional source name, extraction status, and a half-open range into `document.blocks`; empty and skipped units are retained.
 

@@ -18,7 +18,15 @@ use std::collections::HashMap;
 use table::TableState;
 use tables::{LIST_LEVELS, Prelude, codepage_encoding, parse_prelude};
 
+#[cfg(test)]
 pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+    parse_with_asset_policy(bytes, crate::AssetRetentionPolicy::default())
+}
+
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     if !bytes.starts_with(b"{\\rtf") {
         return Err(ConvertError::malformed("not an RTF file"));
     }
@@ -26,7 +34,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     // header for \ansicpg first.
     let default_encoding = scan_codepage(bytes);
     let prelude = parse_prelude(bytes, default_encoding);
-    let mut parser = Parser::new(bytes, prelude, default_encoding);
+    let mut parser = Parser::new(bytes, prelude, default_encoding, asset_policy);
     parser.run()?;
     parser.finish()
 }
@@ -407,6 +415,7 @@ impl<'a> Parser<'a> {
         bytes: &'a [u8],
         prelude: Prelude,
         default_encoding: &'static encoding_rs::Encoding,
+        asset_policy: crate::AssetRetentionPolicy,
     ) -> Self {
         Parser {
             lexer: Lexer::new(bytes),
@@ -421,7 +430,7 @@ impl<'a> Parser<'a> {
             counters: Counters::default(),
             table: TableState::new(),
             dest: Destinations::default(),
-            assets: crate::shared::assets::AssetSink::new(),
+            assets: crate::shared::assets::AssetSink::with_policy(asset_policy),
         }
     }
 

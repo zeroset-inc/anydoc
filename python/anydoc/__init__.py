@@ -4,6 +4,7 @@ from typing import Literal
 
 from anydoc._anydoc import (
     Asset,
+    AssetRetentionPolicy,
     Block,
     Cell,
     CellSlot,
@@ -46,6 +47,7 @@ via `format_from_bytes` or `format_from_extension`."""
 
 __all__ = [
     "Asset",
+    "AssetRetentionPolicy",
     "Block",
     "Cell",
     "CellSlot",
