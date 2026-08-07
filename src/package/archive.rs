@@ -4,8 +4,17 @@ use crate::error::ConvertError;
 use crate::package::limits;
 use crate::package::xml::{Element, parse_xml};
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
+use std::io::{self, Cursor, Read};
 use std::rc::Rc;
+
+/// Read at most `cap + 1` bytes and charge every byte materialized, including
+/// bytes produced before a trailing validation error such as a CRC mismatch.
+fn read_capped<R: Read>(reader: R, cap: u64, total_read: &mut u64) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let result = reader.take(cap + 1).read_to_end(&mut bytes);
+    *total_read = total_read.saturating_add(bytes.len() as u64);
+    result.map(|_| bytes)
+}
 
 /// A ZIP-based document package (OOXML, ODF, EPUB).
 pub struct Package<'a> {
@@ -70,13 +79,13 @@ impl<'a> Package<'a> {
         // remains of the whole-archive total.
         let remaining_total = limits::MAX_TOTAL_BYTES.saturating_sub(self.total_read);
         let cap = limits::MAX_ENTRY_BYTES.min(remaining_total);
-        let mut bytes = Vec::new();
-        let read = (&mut file).take(cap + 1).read_to_end(&mut bytes).map_err(|e| {
+        let bytes = read_capped(&mut file, cap, &mut self.total_read).map_err(|e| {
             ConvertError::Malformed {
                 part: Some(name.to_string()),
                 detail: format!("corrupt archive entry: {e}"),
             }
-        })? as u64;
+        })?;
+        let read = bytes.len() as u64;
         if read > cap {
             return Err(if remaining_total < limits::MAX_ENTRY_BYTES {
                 ConvertError::ResourceLimit {
@@ -90,7 +99,6 @@ impl<'a> Package<'a> {
                 }
             });
         }
-        self.total_read += read;
         let bytes: Rc<[u8]> = Rc::from(bytes);
         self.cache.insert(name.to_string(), Rc::clone(&bytes));
         Ok(Some(bytes))
@@ -185,14 +193,13 @@ impl<'a> Package<'a> {
         let remaining_total = limits::MAX_TOTAL_BYTES.saturating_sub(self.total_read);
         let hard_cap = limits::MAX_ENTRY_BYTES.min(remaining_total);
         let cap = application_cap.map_or(hard_cap, |limit| hard_cap.min(limit as u64));
-        let mut bytes = Vec::new();
-        let read = (&mut file).take(cap + 1).read_to_end(&mut bytes).map_err(|e| {
+        let bytes = read_capped(&mut file, cap, &mut self.total_read).map_err(|e| {
             ConvertError::Malformed {
                 part: Some(name.to_string()),
                 detail: format!("corrupt archive entry: {e}"),
             }
-        })? as u64;
-        self.total_read = self.total_read.saturating_add(read);
+        })?;
+        let read = bytes.len() as u64;
         if read > cap {
             if application_cap.is_some_and(|limit| (limit as u64) < hard_cap) {
                 return Ok(AssetPart::PolicyExceeded(read as usize));
@@ -268,6 +275,39 @@ mod tests {
         w.finish().unwrap().into_inner()
     }
 
+    fn corrupt_first_entry_zip(payload_len: usize) -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for name in ["bad.bin", "next.bin"] {
+            w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(&vec![7u8; payload_len]).unwrap();
+        }
+        let mut data = w.finish().unwrap().into_inner();
+        let central = data.windows(4).position(|window| window == b"PK\x01\x02").unwrap();
+        let crc = u32::from_le_bytes(data[central + 16..central + 20].try_into().unwrap());
+        data[central + 16..central + 20].copy_from_slice(&(crc ^ 1).to_le_bytes());
+        data
+    }
+
+    fn assert_corrupt_read_charges_budget(mut pkg: Package<'_>) {
+        const PAYLOAD_LEN: u64 = 4096;
+        pkg.total_read = limits::MAX_TOTAL_BYTES - PAYLOAD_LEN;
+
+        assert!(matches!(pkg.asset_part("bad.bin", None).unwrap(), AssetPart::Missing));
+        assert_eq!(
+            pkg.total_read,
+            limits::MAX_TOTAL_BYTES,
+            "bytes materialized before the CRC error must consume the archive budget"
+        );
+        let err = match pkg.asset_part("next.bin", None) {
+            Err(err) => err,
+            Ok(_) => panic!("next asset should exceed the archive budget"),
+        };
+        assert!(
+            matches!(err, ConvertError::ResourceLimit { limit: "max_total_bytes", .. }),
+            "expected max_total_bytes after the corrupt read consumed the budget, got: {err}"
+        );
+    }
+
     #[test]
     fn repeated_reads_are_cached_and_charged_once() {
         let data = one_part_zip("media/a.bin", &[7u8; 4096]);
@@ -321,5 +361,31 @@ mod tests {
         let result = pkg.asset_part("media/a.bin", Some(8)).unwrap();
         assert!(matches!(result, AssetPart::PolicyExceeded(9)));
         assert_eq!(pkg.total_read, 9, "only cap + one byte should be decompressed");
+    }
+
+    #[test]
+    fn corrupt_asset_read_charges_materialized_bytes_before_skipping() {
+        let data = corrupt_first_entry_zip(4096);
+        assert_corrupt_read_charges_budget(Package::open(&data).unwrap());
+    }
+
+    #[test]
+    fn corrupt_optional_part_charges_materialized_bytes_before_skipping() {
+        const PAYLOAD_LEN: u64 = 4096;
+        let data = corrupt_first_entry_zip(PAYLOAD_LEN as usize);
+        let mut pkg = Package::open(&data).unwrap();
+        pkg.total_read = limits::MAX_TOTAL_BYTES - PAYLOAD_LEN;
+
+        assert!(pkg.optional_part("bad.bin").unwrap().is_none());
+        assert_eq!(
+            pkg.total_read,
+            limits::MAX_TOTAL_BYTES,
+            "bytes materialized before the CRC error must consume the archive budget"
+        );
+        let err = pkg.optional_part("next.bin").unwrap_err();
+        assert!(
+            matches!(err, ConvertError::ResourceLimit { limit: "max_total_bytes", .. }),
+            "expected max_total_bytes after the corrupt read consumed the budget, got: {err}"
+        );
     }
 }
