@@ -67,15 +67,6 @@ impl<'a, 'b> Ctx<'a, 'b> {
         rel_target_bytes(self.pkg, &self.rels, &self.base_part, rel_id)
     }
 
-    fn add_asset(
-        &self,
-        media_type: String,
-        part: String,
-        bytes: &[u8],
-    ) -> Result<crate::model::AssetId, ConvertError> {
-        self.assets.borrow_mut().add(media_type, part, bytes)
-    }
-
     /// Pick the branch of an `mc:AlternateContent` to process.
     fn alternate_branch<'e>(&self, alt: &'e Element) -> Option<&'e Element> {
         crate::shared::mc::alternate_branch(alt, SUPPORTED_NS)
@@ -565,14 +556,14 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 descr.clone()
             };
             let source = match ole.attr_qualified(ns::R, "id") {
-                Some(rel_id) => match self.ctx.rel_part(rel_id)? {
-                    Some((part, bytes)) => Some(ImageSource::Asset(self.ctx.add_asset(
-                        "application/vnd.ms-ole-object".into(),
-                        part,
-                        &bytes,
-                    )?)),
-                    None => None,
-                },
+                Some(rel_id) => crate::shared::assets::rel_asset_source(
+                    self.ctx.pkg,
+                    &self.ctx.rels,
+                    &self.ctx.base_part,
+                    self.ctx.assets,
+                    rel_id,
+                    "application/vnd.ms-ole-object",
+                )?,
                 None => None,
             };
             self.push(Inline::Image { alt, source: source.unwrap_or(ImageSource::Unavailable) });

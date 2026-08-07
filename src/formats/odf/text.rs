@@ -446,17 +446,9 @@ fn load_image(ctx: &Ctx, href: &str) -> Result<Option<ImageSource>, ConvertError
             return Ok(None);
         }
     };
-    match ctx.pkg.borrow_mut().optional_part(&target.path)? {
-        Some(bytes) => {
-            let media = media_type_for(&target.path);
-            let id = ctx.assets.borrow_mut().add(media, target.path, &bytes)?;
-            Ok(Some(ImageSource::Asset(id)))
-        }
-        None => {
-            log::warn!("image part {} is missing", target.path);
-            Ok(None)
-        }
-    }
+    let media = media_type_for(&target.path);
+    Ok(crate::shared::assets::package_asset(ctx.pkg, ctx.assets, media, target.path)?
+        .map(ImageSource::Asset))
 }
 
 /// ODF hrefs: external URLs, package-relative paths, or `#target` internal

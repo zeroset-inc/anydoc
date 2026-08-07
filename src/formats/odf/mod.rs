@@ -14,7 +14,15 @@ use crate::shared::assets::AssetSink;
 use std::cell::RefCell;
 use text::{Ctx, parse_container};
 
+#[cfg(test)]
 pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+    parse_with_asset_policy(bytes, crate::AssetRetentionPolicy::default())
+}
+
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     let pkg = RefCell::new(Package::open(bytes)?);
 
     if is_encrypted(&pkg)? {
@@ -37,7 +45,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         .and_then(|d| d.find(ns::OFFICE, "body"))
         .ok_or_else(|| ConvertError::malformed_part("content.xml", "no office:body"))?;
 
-    let assets = RefCell::new(AssetSink::new());
+    let assets = RefCell::new(AssetSink::with_policy(asset_policy));
     let ctx = Ctx::new(&styles, &pkg, &assets);
 
     let mut source_units = Vec::new();

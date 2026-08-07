@@ -64,11 +64,14 @@ pub(super) struct XlsxImages {
 /// Extract standard DrawingML pictures from an XLSX/XLSM package. Every part
 /// read passes through `Package`, so archive/XML limits apply before bytes are
 /// retained by `AssetSink`. Other Calamine containers return no drawings.
-pub(super) fn xlsx_images(bytes: &[u8]) -> Result<XlsxImages, ConvertError> {
+pub(super) fn xlsx_images(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<XlsxImages, ConvertError> {
     let mut units = Vec::new();
     let mut by_sheet = HashMap::new();
     let mut degraded_sheets = HashSet::new();
-    let assets = RefCell::new(AssetSink::new());
+    let assets = RefCell::new(AssetSink::with_policy(asset_policy));
     if !bytes.starts_with(b"PK\x03\x04") {
         return Ok(XlsxImages {
             availability: XlsxImageAvailability::UnsupportedBinary,

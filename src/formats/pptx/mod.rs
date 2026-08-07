@@ -48,7 +48,15 @@ struct MasterInfo {
     placeholders: Vec<Placeholder>,
 }
 
+#[cfg(test)]
 pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+    parse_with_asset_policy(bytes, crate::AssetRetentionPolicy::default())
+}
+
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     let pkg = match Package::open(bytes) {
         Ok(p) => p,
         Err(e) => return Err(probe_ole(bytes).unwrap_or(e)),
@@ -86,7 +94,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         ));
     }
 
-    let assets = RefCell::new(AssetSink::new());
+    let assets = RefCell::new(AssetSink::with_policy(asset_policy));
     let mut layouts: HashMap<String, LayoutInfo> = HashMap::new();
     let mut masters: HashMap<String, MasterInfo> = HashMap::new();
     let mut blocks: Vec<Block> = Vec::new();
@@ -583,14 +591,14 @@ fn parse_graphic_frame(
         let alt =
             if name.is_empty() { format!("Embedded object: {prog_id}") } else { name.to_string() };
         let source = match ole.attr_qualified(ns::R, "id") {
-            Some(rid) => match ctx.rel_part(rid)? {
-                Some((part, bytes)) => Some(ImageSource::Asset(ctx.assets.borrow_mut().add(
-                    "application/vnd.ms-ole-object".into(),
-                    part,
-                    &bytes,
-                )?)),
-                None => None,
-            },
+            Some(rid) => crate::shared::assets::rel_asset_source(
+                ctx.pkg,
+                ctx.rels,
+                ctx.base_part,
+                ctx.assets,
+                rid,
+                "application/vnd.ms-ole-object",
+            )?,
             None => None,
         };
         blocks.push(Block::Paragraph(vec![Inline::Image {

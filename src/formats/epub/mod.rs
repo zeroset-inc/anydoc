@@ -11,7 +11,10 @@ use crate::shared::uri::is_absolute_uri;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     let pkg = RefCell::new(Package::open(bytes)?);
 
     let container = pkg.borrow_mut().required_xml_part("META-INF/container.xml")?;
@@ -55,7 +58,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         .filter_map(|href| path::resolve(&opf_path, href).ok().map(|t| t.path))
         .collect();
 
-    let assets = RefCell::new(AssetSink::new());
+    let assets = RefCell::new(AssetSink::with_policy(asset_policy));
     let mut css_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut failed = 0usize;
     for href in &spine_hrefs {
@@ -182,14 +185,9 @@ impl HtmlCtx for ChapterCtx<'_, '_> {
         let Ok(target) = path::resolve(&self.chapter_path, src) else {
             return Ok(None);
         };
-        match self.pkg.borrow_mut().optional_part(&target.path)? {
-            Some(bytes) => {
-                let media = media_type_for(&target.path);
-                let id = self.assets.borrow_mut().add(media, target.path, &bytes)?;
-                Ok(Some(ImageSource::Asset(id)))
-            }
-            None => Ok(None),
-        }
+        let media = media_type_for(&target.path);
+        Ok(crate::shared::assets::package_asset(self.pkg, self.assets, media, target.path)?
+            .map(ImageSource::Asset))
     }
 
     fn anchor_id(&self, raw: &str) -> AnchorId {

@@ -53,17 +53,29 @@ def format_from_extension(extension: str) -> Format | None:
 def format_from_path(path: str | os.PathLike[str]) -> Format | None:
     """The format a path's extension names."""
 
-def to_markdown(path: str | os.PathLike[str]) -> str:
+def to_markdown(
+    path: str | os.PathLike[str], *, asset_policy: AssetRetentionPolicy | None = None
+) -> str:
     """Convert a document file to Markdown. The format is detected from the
     file content; the extension is the fallback for signature-less formats
     (CSV) and unrecognizable containers."""
 
-def to_markdown_bytes(data: bytes | bytearray, format: Format | None = None) -> str:
+def to_markdown_bytes(
+    data: bytes | bytearray,
+    format: Format | None = None,
+    *,
+    asset_policy: AssetRetentionPolicy | None = None,
+) -> str:
     """Convert an in-memory document to Markdown. Without a format, it is
     detected from the content, which signature-less formats (CSV) have to
     name explicitly."""
 
-def to_document(data: bytes | bytearray, format: Format | None = None) -> Document:
+def to_document(
+    data: bytes | bytearray,
+    format: Format | None = None,
+    *,
+    asset_policy: AssetRetentionPolicy | None = None,
+) -> Document:
     """Parse an in-memory document into the document model, which also
     carries the embedded assets. Without a format, it is detected from the
     content.
@@ -72,11 +84,13 @@ def to_document(data: bytes | bytearray, format: Format | None = None) -> Docume
     no document-model form; use `to_markdown_bytes`."""
 
 def to_rendered_parts(data: bytes | bytearray, format: Format | None = None) -> RenderedParts:
-    """Parse and render only ordered Markdown/provenance parts. The full
-    document model, complete Markdown string, and embedded asset bytes are not
-    converted into Python objects."""
+    """Parse and render only ordered Markdown/provenance parts. Embedded
+    payloads are not retained because this compact result cannot expose
+    them."""
 
-def extract_spreadsheet_assets(data: bytes | bytearray) -> SpreadsheetAssetManifest:
+def extract_spreadsheet_assets(
+    data: bytes | bytearray, *, asset_policy: AssetRetentionPolicy | None = None
+) -> SpreadsheetAssetManifest:
     """Extract ordered spreadsheet sheet provenance and embedded DrawingML
     assets without parsing cells or rendering tables and Markdown."""
 
@@ -141,6 +155,7 @@ class SpreadsheetAssetManifest:
     """Stable machine-readable explanation when unsupported."""
     source_units: list[SpreadsheetAssetSourceUnit]
     assets: list[Asset]
+    """Embedded assets, including caller-policy omissions, indexed by id."""
 
 @final
 class SpreadsheetAssetSourceUnit:
@@ -153,7 +168,7 @@ class SpreadsheetAssetSourceUnit:
     reason: str | None
     """Stable machine-readable explanation when degraded."""
     asset_ids: list[int]
-    """Distinct retained asset ids referenced by this sheet."""
+    """Distinct asset ids referenced by this sheet."""
 
 @final
 class Block:
@@ -278,8 +293,8 @@ class Note:
 
 @final
 class Asset:
-    """An embedded binary asset (image, object payload). Bytes are always
-    retained, so a document stays self-contained."""
+    """An embedded binary asset (image, object payload), including provenance
+    for payloads omitted by caller retention policy."""
 
     id: int
     """Index into `Document.assets`, as referenced by an image source."""
@@ -287,4 +302,25 @@ class Asset:
     """MIME type, e.g. `image/png`."""
     origin_part: str
     """Package part or stream the asset came from, for provenance."""
-    data: bytes
+    byte_len: int
+    """Payload size reported by the container or observed by the parser."""
+    data: bytes | None
+    """Exact payload, or `None` when caller retention policy omitted it."""
+    omission_reason: Literal["max_unique_assets", "max_total_bytes", "max_asset_bytes"] | None
+    """Configured budget responsible for an omitted payload."""
+
+@final
+class AssetRetentionPolicy:
+    """Application budgets for embedded asset payload retention."""
+
+    max_unique_assets: int | None
+    max_total_bytes: int | None
+    max_asset_bytes: int | None
+
+    def __init__(
+        self,
+        *,
+        max_unique_assets: int | None = None,
+        max_total_bytes: int | None = None,
+        max_asset_bytes: int | None = None,
+    ) -> None: ...

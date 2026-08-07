@@ -27,7 +27,7 @@ pub struct SpreadsheetAssetSourceUnit {
     status: &'static str,
     /// Stable machine-readable explanation when degraded.
     reason: Option<String>,
-    /// Distinct retained asset ids referenced by this sheet.
+    /// Distinct asset ids referenced by this sheet.
     asset_ids: Py<PyList>,
 }
 

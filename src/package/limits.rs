@@ -32,6 +32,7 @@ pub const MAX_EXPANSION: u64 = 4_000_000;
 pub const MAX_EXPANSION_TEXT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Maximum total bytes of embedded assets retained in a `Document`: 128 MiB.
+/// Caller policy can select a lower application budget.
 pub const MAX_ASSET_TOTAL_BYTES: usize = 128 * 1024 * 1024;
 
 /// Maximum nesting depth of binary record containers (legacy PPT stream).

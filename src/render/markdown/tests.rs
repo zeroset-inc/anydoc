@@ -266,7 +266,9 @@ fn rendered_parts_partition_blocks_and_find_nested_assets() {
                 id: AssetId(id),
                 media_type: "image/png".into(),
                 origin_part: format!("image{id}.png"),
+                byte_len: 1,
                 bytes: vec![id as u8],
+                omission_reason: None,
             })
             .collect(),
     };
@@ -308,7 +310,9 @@ fn unreferenced_assets_get_a_trailing_unowned_part() {
             id: AssetId(0),
             media_type: "image/png".into(),
             origin_part: "Pictures stream".into(),
+            byte_len: 1,
             bytes: vec![0],
+            omission_reason: None,
         }],
     };
 
@@ -760,7 +764,9 @@ fn rendered_note_assets_follow_definition_order_and_exclude_duplicates() {
                 id: AssetId(id),
                 media_type: "image/png".into(),
                 origin_part: format!("image{id}.png"),
+                byte_len: 1,
                 bytes: vec![id as u8],
+                omission_reason: None,
             })
             .collect(),
     };
@@ -801,7 +807,9 @@ fn render_empty_canonical_note_keeps_asset_and_blank_duplicate_does_not_win() {
                 id: AssetId(id),
                 media_type: "image/png".into(),
                 origin_part: format!("image{id}.png"),
+                byte_len: 1,
                 bytes: vec![id as u8],
+                omission_reason: None,
             })
             .collect(),
     };

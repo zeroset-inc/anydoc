@@ -19,6 +19,13 @@ pub struct Package<'a> {
     cache: HashMap<String, Rc<[u8]>>,
 }
 
+pub(crate) enum AssetPart {
+    Missing,
+    Loaded(Vec<u8>),
+    /// Payload exceeded the application cap; value is an observed lower bound.
+    PolicyExceeded(usize),
+}
+
 impl<'a> Package<'a> {
     pub fn open(bytes: &'a [u8]) -> Result<Self, ConvertError> {
         let zip = zip::ZipArchive::new(Cursor::new(bytes))
@@ -94,6 +101,22 @@ impl<'a> Package<'a> {
         self.zip.index_for_name(name.trim_start_matches('/')).is_some()
     }
 
+    /// A part's declared decompressed size without reading its payload.
+    pub fn part_size(&mut self, name: &str) -> Result<Option<u64>, ConvertError> {
+        let name = name.trim_start_matches('/');
+        if let Some(bytes) = self.cache.get(name) {
+            return Ok(Some(bytes.len() as u64));
+        }
+        match self.zip.by_name(name) {
+            Ok(file) => Ok(Some(file.size())),
+            Err(zip::result::ZipError::FileNotFound) => Ok(None),
+            Err(e) => Err(ConvertError::Malformed {
+                part: Some(name.to_string()),
+                detail: format!("unreadable archive entry: {e}"),
+            }),
+        }
+    }
+
     /// Read a part that must exist for any meaningful output.
     pub fn required_part(&mut self, name: &str) -> Result<Rc<[u8]>, ConvertError> {
         self.part(name)?.ok_or_else(|| ConvertError::MissingPart { part: name.to_string() })
@@ -111,6 +134,82 @@ impl<'a> Package<'a> {
                 Ok(None)
             }
         }
+    }
+
+    /// Read an asset into an owned buffer without placing a second copy in
+    /// the package cache. An application cap bounds even forged ZIP sizes.
+    pub(crate) fn asset_part(
+        &mut self,
+        name: &str,
+        application_cap: Option<usize>,
+    ) -> Result<AssetPart, ConvertError> {
+        let result = self.read_asset_part(name, application_cap);
+        match result {
+            Ok(result) => Ok(result),
+            Err(e) if e.is_fatal() => Err(e),
+            Err(e) => {
+                log::warn!("skipping unreadable part {name}: {e}");
+                Ok(AssetPart::Missing)
+            }
+        }
+    }
+
+    fn read_asset_part(
+        &mut self,
+        name: &str,
+        application_cap: Option<usize>,
+    ) -> Result<AssetPart, ConvertError> {
+        let name = name.trim_start_matches('/');
+        if let Some(bytes) = self.cache.get(name) {
+            return Ok(match application_cap {
+                Some(cap) if bytes.len() > cap => AssetPart::PolicyExceeded(cap + 1),
+                _ => AssetPart::Loaded(bytes.to_vec()),
+            });
+        }
+        let mut file = match self.zip.by_name(name) {
+            Ok(file) => file,
+            Err(zip::result::ZipError::FileNotFound) => return Ok(AssetPart::Missing),
+            Err(e) => {
+                return Err(ConvertError::Malformed {
+                    part: Some(name.to_string()),
+                    detail: format!("unreadable archive entry: {e}"),
+                });
+            }
+        };
+        if file.size() > limits::MAX_ENTRY_BYTES {
+            return Err(ConvertError::ResourceLimit {
+                limit: "max_entry_bytes",
+                detail: format!("{name} declares {} decompressed bytes", file.size()),
+            });
+        }
+        let remaining_total = limits::MAX_TOTAL_BYTES.saturating_sub(self.total_read);
+        let hard_cap = limits::MAX_ENTRY_BYTES.min(remaining_total);
+        let cap = application_cap.map_or(hard_cap, |limit| hard_cap.min(limit as u64));
+        let mut bytes = Vec::new();
+        let read = (&mut file).take(cap + 1).read_to_end(&mut bytes).map_err(|e| {
+            ConvertError::Malformed {
+                part: Some(name.to_string()),
+                detail: format!("corrupt archive entry: {e}"),
+            }
+        })? as u64;
+        self.total_read = self.total_read.saturating_add(read);
+        if read > cap {
+            if application_cap.is_some_and(|limit| (limit as u64) < hard_cap) {
+                return Ok(AssetPart::PolicyExceeded(read as usize));
+            }
+            return Err(if remaining_total < limits::MAX_ENTRY_BYTES {
+                ConvertError::ResourceLimit {
+                    limit: "max_total_bytes",
+                    detail: format!("{name} exceeds the archive's remaining decompression budget"),
+                }
+            } else {
+                ConvertError::ResourceLimit {
+                    limit: "max_entry_bytes",
+                    detail: format!("{name} exceeds the decompression cap"),
+                }
+            });
+        }
+        Ok(AssetPart::Loaded(bytes))
     }
 
     /// Read and parse an optional XML part under the unified recovery policy:
@@ -204,5 +303,23 @@ mod tests {
         let data = one_part_zip("word/document.xml", b"<x/>");
         let mut pkg = Package::open(&data).unwrap();
         assert!(pkg.part("/word/document.xml").unwrap().is_some());
+    }
+
+    #[test]
+    fn asset_read_cap_handles_a_forged_declared_size_without_large_allocation() {
+        let payload = vec![7u8; 4096];
+        let mut data = one_part_zip("media/a.bin", &payload);
+        // Forge both local and central uncompressed-size fields downward.
+        // The deflate stream still expands to 4096 bytes.
+        let local = data.windows(4).position(|w| w == b"PK\x03\x04").unwrap();
+        data[local + 22..local + 26].copy_from_slice(&1u32.to_le_bytes());
+        let central = data.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        data[central + 24..central + 28].copy_from_slice(&1u32.to_le_bytes());
+
+        let mut pkg = Package::open(&data).unwrap();
+        assert_eq!(pkg.part_size("media/a.bin").unwrap(), Some(1));
+        let result = pkg.asset_part("media/a.bin", Some(8)).unwrap();
+        assert!(matches!(result, AssetPart::PolicyExceeded(9)));
+        assert_eq!(pkg.total_read, 9, "only cap + one byte should be decompressed");
     }
 }

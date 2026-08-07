@@ -17,7 +17,15 @@ use content::Ctx;
 use numbering::Counters;
 use std::cell::RefCell;
 
+#[cfg(test)]
 pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+    parse_with_asset_policy(bytes, crate::AssetRetentionPolicy::default())
+}
+
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     let pkg = match Package::open(bytes) {
         Ok(p) => p,
         Err(e) => return Err(crate::package::archive::probe_ole(bytes).unwrap_or(e)),
@@ -56,7 +64,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         .ok_or_else(|| ConvertError::malformed_part(main_part.clone(), "no document body"))?;
 
     let counters = RefCell::new(Counters::default());
-    let assets = RefCell::new(AssetSink::new());
+    let assets = RefCell::new(AssetSink::with_policy(asset_policy));
 
     let footnotes_part =
         typed_part_path(&doc_rels, &main_part, rel_type::FOOTNOTES, "footnotes.xml");

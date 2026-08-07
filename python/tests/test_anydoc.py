@@ -70,11 +70,51 @@ class AnydocTest(unittest.TestCase):
         image = next(asset for asset in document.assets if asset.media_type == "image/png")
         self.assertIsInstance(image.data, bytes)
         self.assertGreater(len(image.data), 0)
+        self.assertEqual(image.byte_len, len(image.data))
+        self.assertIsNone(image.omission_reason)
         self.assertEqual(image.id, document.assets.index(image))
         self.assertEqual(
             {asset_id for part in document.rendered_parts for asset_id in part.asset_ids},
             {asset.id for asset in document.assets},
         )
+
+    def test_asset_policy_preserves_text_and_ownership_with_structured_omissions(self):
+        data = RICH.read_bytes()
+        full = anydoc.to_document(data, "docx")
+        limited = anydoc.to_document(
+            data,
+            "docx",
+            asset_policy=anydoc.AssetRetentionPolicy(max_unique_assets=0),
+        )
+
+        self.assertEqual(limited.markdown, full.markdown)
+        self.assertEqual(len(limited.assets), len(full.assets))
+        omitted = next(asset for asset in limited.assets if asset.media_type == "image/png")
+        self.assertIsNone(omitted.data)
+        self.assertGreater(omitted.byte_len, 0)
+        self.assertEqual(omitted.omission_reason, "max_unique_assets")
+        self.assertIn(
+            omitted.id,
+            {asset_id for part in limited.rendered_parts for asset_id in part.asset_ids},
+        )
+
+    def test_asset_policy_distinguishes_individual_and_aggregate_budgets(self):
+        data = RICH.read_bytes()
+        for policy, reason in (
+            (anydoc.AssetRetentionPolicy(max_asset_bytes=0), "max_asset_bytes"),
+            (anydoc.AssetRetentionPolicy(max_total_bytes=0), "max_total_bytes"),
+        ):
+            with self.subTest(reason=reason):
+                document = anydoc.to_document(data, "docx", asset_policy=policy)
+                self.assertTrue(document.assets)
+                self.assertEqual(
+                    {asset.omission_reason for asset in document.assets},
+                    {reason},
+                )
+
+    def test_asset_policy_rejects_negative_budgets(self):
+        with self.assertRaises(OverflowError):
+            anydoc.AssetRetentionPolicy(max_total_bytes=-1)
 
     def test_to_document_exposes_source_units(self):
         document = anydoc.to_document(PRESENTATION.read_bytes(), "pptx")
@@ -171,6 +211,15 @@ class AnydocTest(unittest.TestCase):
         self.assertEqual(len(manifest.assets), 1)
         self.assertEqual(manifest.assets[0].origin_part, "xl/media/owned.png")
         self.assertEqual(manifest.assets[0].data, b"owned-image")
+
+        limited = anydoc.extract_spreadsheet_assets(
+            _xlsx_with_owned_image(),
+            asset_policy=anydoc.AssetRetentionPolicy(max_unique_assets=0),
+        )
+        self.assertEqual(limited.source_units[1].asset_ids, [0])
+        self.assertIsNone(limited.assets[0].data)
+        self.assertEqual(limited.assets[0].byte_len, len(b"owned-image"))
+        self.assertEqual(limited.assets[0].omission_reason, "max_unique_assets")
 
     def test_binary_spreadsheet_assets_are_explicitly_unsupported(self):
         manifest = anydoc.extract_spreadsheet_assets(XLS.read_bytes())

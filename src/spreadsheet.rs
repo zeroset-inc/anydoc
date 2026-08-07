@@ -31,7 +31,7 @@ pub struct SpreadsheetAssetSourceUnit {
     pub status: SpreadsheetAssetUnitStatus,
     /// Stable machine-readable reason when extraction degraded.
     pub reason: Option<String>,
-    /// Distinct retained assets referenced by this sheet, in first-use order.
+    /// Distinct assets referenced by this sheet, in first-use order.
     pub asset_ids: Vec<AssetId>,
 }
 
@@ -44,6 +44,6 @@ pub struct SpreadsheetAssetManifest {
     pub reason: Option<String>,
     /// Every OOXML sheet in workbook order, including sheets with no images.
     pub source_units: Vec<SpreadsheetAssetSourceUnit>,
-    /// Retained embedded assets, indexed by their ids.
+    /// Embedded assets, including caller-policy omissions, indexed by id.
     pub assets: Vec<Asset>,
 }

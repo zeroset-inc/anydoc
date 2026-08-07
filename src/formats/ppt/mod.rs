@@ -25,7 +25,10 @@ use styletext::{CharProps, MasterLevel, StyleRuns};
 /// instance (the text type).
 type MasterStyles = HashMap<u16, Vec<MasterLevel>>;
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     let cursor = Cursor::new(bytes);
     let mut ole = cfb::CompoundFile::open(cursor)
         .map_err(|e| ConvertError::malformed(format!("not an OLE2 compound file: {e}")))?;
@@ -48,7 +51,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     if ex.encrypted {
         return Err(ConvertError::Encrypted);
     }
-    let assets = collect_pictures(&mut ole)?;
+    let assets = collect_pictures(&mut ole, asset_policy)?;
     let (blocks, source_units) = ex.into_content();
     Ok(Document { blocks, source_units, notes: Vec::new(), assets })
 }
@@ -58,12 +61,13 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
 /// placement is not resolved. Unsupported formats degrade with a log.
 fn collect_pictures<R: std::io::Read + std::io::Seek>(
     ole: &mut cfb::CompoundFile<R>,
+    asset_policy: crate::AssetRetentionPolicy,
 ) -> Result<Vec<crate::model::Asset>, ConvertError> {
     use crate::shared::officeart;
     let Ok(pictures) = read_ole_stream(ole, "Pictures") else {
         return Ok(Vec::new());
     };
-    let mut sink = crate::shared::assets::AssetSink::new();
+    let mut sink = crate::shared::assets::AssetSink::with_policy(asset_policy);
     let mut pos = 0usize;
     let mut index = 0u32;
     while let Some((ver_inst, rec_type, body)) = officeart::record_at(&pictures, pos) {

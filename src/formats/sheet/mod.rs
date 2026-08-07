@@ -26,7 +26,15 @@ fn contained<T>(op: &str, f: impl FnOnce() -> T) -> Result<T, ConvertError> {
     })
 }
 
+#[cfg(test)]
 pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+    parse_with_asset_policy(bytes, crate::AssetRetentionPolicy::default())
+}
+
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     let mut workbook =
         contained("workbook open", || open_workbook_auto_from_rs(Cursor::new(bytes)))?
             .map_err(map_open_error)?;
@@ -37,7 +45,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     // before AnyDoc can enforce archive and retained-asset limits. Parse OOXML
     // drawings through the bounded package layer instead. Binary XLS/XLSB do
     // not expose reliable image positions and remain cell-text-only.
-    let extracted_images = xlsx_images(bytes)?;
+    let extracted_images = xlsx_images(bytes, asset_policy)?;
     let mut images = extracted_images.by_sheet;
     let mut degraded_drawings = extracted_images.degraded_sheets;
     let assets = extracted_images.assets;
@@ -215,14 +223,22 @@ fn place_anchored_image(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn extract_assets(
     bytes: &[u8],
+) -> Result<crate::spreadsheet::SpreadsheetAssetManifest, ConvertError> {
+    extract_assets_with_policy(bytes, crate::AssetRetentionPolicy::default())
+}
+
+pub(crate) fn extract_assets_with_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
 ) -> Result<crate::spreadsheet::SpreadsheetAssetManifest, ConvertError> {
     use crate::spreadsheet::{
         SpreadsheetAssetAvailability, SpreadsheetAssetSourceUnit, SpreadsheetAssetUnitStatus,
     };
 
-    let extracted = xlsx_images(bytes)?;
+    let extracted = xlsx_images(bytes, asset_policy)?;
     let availability = match extracted.availability {
         XlsxImageAvailability::Available => SpreadsheetAssetAvailability::Available,
         XlsxImageAvailability::UnsupportedBinary => SpreadsheetAssetAvailability::Unsupported,
@@ -846,6 +862,29 @@ mod tests {
         assert_eq!(manifest.source_units[0].asset_ids, [crate::model::AssetId(0)]);
         assert_eq!(manifest.assets.len(), 1, "one package part is retained once");
         assert_eq!(manifest.assets[0].origin_part, "xl/media/image1.png");
+    }
+
+    #[test]
+    fn policy_omission_keeps_sheet_ownership_without_marking_it_degraded() {
+        let bytes =
+            xlsx_with_images("", None, &absolute_anchor("Policy omitted"), images::IMAGE_REL);
+        let manifest = extract_assets_with_policy(
+            &bytes,
+            crate::AssetRetentionPolicy { max_unique_assets: Some(0), ..Default::default() },
+        )
+        .unwrap();
+
+        assert_eq!(manifest.source_units[0].asset_ids, [crate::model::AssetId(0)]);
+        assert_eq!(
+            manifest.source_units[0].status,
+            crate::spreadsheet::SpreadsheetAssetUnitStatus::Complete
+        );
+        assert_eq!(manifest.source_units[0].reason, None);
+        assert_eq!(
+            manifest.assets[0].omission_reason,
+            Some(crate::model::AssetOmissionReason::MaxUniqueAssets)
+        );
+        assert!(manifest.assets[0].bytes.is_empty());
     }
 
     #[test]
