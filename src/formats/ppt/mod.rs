@@ -9,7 +9,9 @@
 mod styletext;
 
 use crate::error::ConvertError;
-use crate::model::{Block, Document, Inline, Style, inlines_are_empty};
+use crate::model::{
+    Block, Document, Inline, SourceUnit, SourceUnitKind, SourceUnitStatus, Style, inlines_are_empty,
+};
 use crate::package::limits;
 use crate::shared::binary::{get_u32, read_ole_stream, utf16le_units};
 use crate::shared::delta::{StyleDelta, rebase_emphasis};
@@ -24,7 +26,10 @@ use styletext::{CharProps, MasterLevel, StyleRuns};
 /// instance (the text type).
 type MasterStyles = HashMap<u16, Vec<MasterLevel>>;
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     let cursor = Cursor::new(bytes);
     let mut ole = cfb::CompoundFile::open(cursor)
         .map_err(|e| ConvertError::malformed(format!("not an OLE2 compound file: {e}")))?;
@@ -42,13 +47,14 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         ex = Extractor::default();
         ex.recovering = true;
         ex.walk(&data)?;
-        ex.end_segment(None);
+        ex.end_segment(None, false, None);
     }
     if ex.encrypted {
         return Err(ConvertError::Encrypted);
     }
-    let assets = collect_pictures(&mut ole)?;
-    Ok(Document { blocks: ex.into_blocks(), notes: Vec::new(), assets })
+    let assets = collect_pictures(&mut ole, asset_policy)?;
+    let (blocks, source_units) = ex.into_content();
+    Ok(Document { blocks, source_units, notes: Vec::new(), assets })
 }
 
 /// Retain the deck's embedded pictures from the `Pictures` stream (OfficeArt
@@ -56,12 +62,13 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
 /// placement is not resolved. Unsupported formats degrade with a log.
 fn collect_pictures<R: std::io::Read + std::io::Seek>(
     ole: &mut cfb::CompoundFile<R>,
+    asset_policy: crate::AssetRetentionPolicy,
 ) -> Result<Vec<crate::model::Asset>, ConvertError> {
     use crate::shared::officeart;
     let Ok(pictures) = read_ole_stream(ole, "Pictures") else {
         return Ok(Vec::new());
     };
-    let mut sink = crate::shared::assets::AssetSink::new();
+    let mut sink = crate::shared::assets::AssetSink::with_policy(asset_policy);
     let mut pos = 0usize;
     let mut index = 0u32;
     while let Some((ver_inst, rec_type, body)) = officeart::record_at(&pictures, pos) {
@@ -106,10 +113,22 @@ struct PendingShape {
     styles: Option<StyleRuns>,
 }
 
+struct PendingPage {
+    persist_ref: Option<u32>,
+    list_id: Option<u32>,
+}
+
+struct Segment {
+    blocks: Vec<Block>,
+    pairing_id: Option<u32>,
+    is_notes: bool,
+    has_page: bool,
+    skip_reason: Option<&'static str>,
+}
+
 #[derive(Default)]
 struct Extractor {
-    /// Finished segments: (blocks, pairing id, is_notes).
-    segments: Vec<(Vec<Block>, Option<u32>, bool)>,
+    segments: Vec<Segment>,
     current: Vec<Block>,
     current_is_notes: bool,
     list_run: Vec<ListEntry>,
@@ -263,26 +282,35 @@ impl Extractor {
         is_notes: bool,
         container_type: u16,
     ) -> Result<(), ConvertError> {
-        // (persistIdRef, slideId) of the page whose container is pending.
-        let mut pending: Option<(u32, u32)> = None;
+        let mut pending: Option<PendingPage> = None;
         for (ver_inst, rec_type, body) in children(list) {
             match rec_type {
                 // SlidePersistAtom: the next slide/notes page begins.
                 0x03F3 => {
-                    let id =
+                    let had_page = pending.is_some();
+                    let (id, skip_reason) =
                         self.finish_slide(pending.take(), persist, data, container_type, is_notes)?;
-                    self.end_segment(id);
+                    self.end_segment(id, had_page, skip_reason);
                     self.current_is_notes = is_notes;
-                    pending = get_u32(body, 0).map(|p| (p, get_u32(body, 12).unwrap_or(0)));
+                    pending = Some(PendingPage {
+                        persist_ref: get_u32(body, 0),
+                        list_id: get_u32(body, 12).filter(|&id| id != 0),
+                    });
                     if !is_notes {
-                        self.select_master(pending.map(|(p, _)| p), persist, data);
+                        self.select_master(
+                            pending.as_ref().and_then(|page| page.persist_ref),
+                            persist,
+                            data,
+                        );
                     }
                 }
                 _ => self.record(ver_inst, rec_type, body)?,
             }
         }
-        let id = self.finish_slide(pending, persist, data, container_type, is_notes)?;
-        self.end_segment(id);
+        let had_page = pending.is_some();
+        let (id, skip_reason) =
+            self.finish_slide(pending, persist, data, container_type, is_notes)?;
+        self.end_segment(id, had_page, skip_reason);
         Ok(())
     }
 
@@ -291,50 +319,61 @@ impl Extractor {
     /// id (NotesAtom slideIdRef) for notes pages.
     fn finish_slide(
         &mut self,
-        pending: Option<(u32, u32)>,
+        pending: Option<PendingPage>,
         persist: &HashMap<u32, usize>,
         data: &[u8],
         container_type: u16,
         is_notes: bool,
-    ) -> Result<Option<u32>, ConvertError> {
-        let Some((persist_ref, slide_id)) = pending else {
-            return Ok(None);
+    ) -> Result<(Option<u32>, Option<&'static str>), ConvertError> {
+        let Some(pending) = pending else {
+            return Ok((None, None));
         };
-        let mut id = if is_notes { None } else { (slide_id != 0).then_some(slide_id) };
-        if let Some(off) = persist.get(&persist_ref)
-            && let Some((_, t, body)) = record_at(data, *off)
-            && t == container_type
-        {
-            if is_notes {
-                // NotesAtom.slideIdRef names the owning slide (0 = none).
-                id = children(body)
-                    .find(|&(_, t, _)| t == 0x03F1)
-                    .and_then(|(.., atom)| get_u32(atom, 0))
-                    .filter(|&v| v != 0);
-            }
-            self.walk(body)?;
+        let mut id = if is_notes { None } else { pending.list_id };
+        let Some(persist_ref) = pending.persist_ref else {
+            return Ok((id, Some("invalid_persist_reference")));
+        };
+        let Some(off) = persist.get(&persist_ref) else {
+            return Ok((id, Some("missing_persist_entry")));
+        };
+        let Some((_, record_type, body)) = record_at(data, *off) else {
+            return Ok((id, Some("missing_page_container")));
+        };
+        if record_type != container_type {
+            return Ok((id, Some("wrong_page_container")));
         }
-        Ok(id)
+        if is_notes {
+            id = children(body)
+                .find(|&(_, t, _)| t == 0x03F1)
+                .and_then(|(.., atom)| get_u32(atom, 0))
+                .filter(|&v| v != 0);
+        }
+        self.walk(body)?;
+        Ok((id, None))
     }
 
-    fn end_segment(&mut self, id: Option<u32>) {
+    fn end_segment(&mut self, id: Option<u32>, had_page: bool, skip_reason: Option<&'static str>) {
         self.flush_shape();
         flush_list(&mut self.current, &mut self.list_run);
-        if !self.current.is_empty() {
-            let blocks = std::mem::take(&mut self.current);
-            self.segments.push((blocks, id, self.current_is_notes));
+        if !self.current.is_empty() || had_page {
+            self.segments.push(Segment {
+                blocks: std::mem::take(&mut self.current),
+                pairing_id: id,
+                is_notes: self.current_is_notes,
+                has_page: had_page,
+                skip_reason,
+            });
         }
     }
 
-    fn into_blocks(mut self) -> Vec<Block> {
-        self.end_segment(None);
-        let mut slides: Vec<(Option<u32>, Vec<Block>)> = Vec::new();
+    fn into_content(mut self) -> (Vec<Block>, Vec<SourceUnit>) {
+        self.end_segment(None, false, None);
+        let mut slides = Vec::new();
         let mut notes: Vec<(Option<u32>, Vec<Block>)> = Vec::new();
-        for (blocks, id, is_notes) in self.segments {
-            if is_notes {
-                notes.push((id, blocks));
+        for segment in self.segments {
+            if segment.is_notes {
+                notes.push((segment.pairing_id, segment.blocks));
             } else {
-                slides.push((id, blocks));
+                slides.push(segment);
             }
         }
         // Notes pages pair to slides by their stored slide id, not by list
@@ -342,13 +381,32 @@ impl Extractor {
         // slides), which order-based zipping would misattribute.
         let mut used = vec![false; notes.len()];
         let mut out = Vec::new();
-        for (sid, blocks) in slides {
-            out.extend(blocks);
+        let mut source_units = Vec::new();
+        let mut slide_ordinal = 0;
+        for slide in slides {
+            let start_block = out.len();
+            out.extend(slide.blocks);
             for (i, (nid, nblocks)) in notes.iter_mut().enumerate() {
-                if !used[i] && sid.is_some() && *nid == sid {
+                if !used[i] && slide.pairing_id.is_some() && *nid == slide.pairing_id {
                     used[i] = true;
                     out.push(Block::BlockQuote(std::mem::take(nblocks)));
                 }
+            }
+            if !self.recovering && slide.has_page {
+                slide_ordinal += 1;
+                source_units.push(SourceUnit {
+                    kind: SourceUnitKind::Slide,
+                    ordinal: slide_ordinal,
+                    name: None,
+                    status: match slide.skip_reason {
+                        Some(_) => SourceUnitStatus::Skipped,
+                        None if out.len() == start_block => SourceUnitStatus::Empty,
+                        None => SourceUnitStatus::Parsed,
+                    },
+                    reason: slide.skip_reason.map(str::to_string),
+                    start_block,
+                    end_block: out.len(),
+                });
             }
         }
         // Notes without a resolvable owner keep document order at the end.
@@ -357,7 +415,7 @@ impl Extractor {
                 out.push(Block::BlockQuote(nblocks));
             }
         }
-        out
+        (out, source_units)
     }
 
     /// Pick the master the slide references (SlideAtom.masterIdRef at
@@ -402,10 +460,10 @@ impl Extractor {
                         .and_then(|(.., atom)| get_u32(atom, 0))
                         .is_some_and(|id| id & 0x8000_0000 != 0);
                     if !master {
-                        self.end_segment(None);
+                        self.end_segment(None, false, None);
                         self.current_is_notes = true;
                         self.walk(body)?;
-                        self.end_segment(None);
+                        self.end_segment(None, false, None);
                         self.current_is_notes = false;
                     }
                 }

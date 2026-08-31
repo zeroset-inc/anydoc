@@ -2,4 +2,8 @@
 source: tests/snapshots.rs
 expression: output
 ---
+<!-- anydoc:source-unit-start kind=slide ordinal=1 status=parsed -->
+
 ## Relocated deck title
+
+<!-- anydoc:source-unit-end kind=slide ordinal=1 status=parsed -->

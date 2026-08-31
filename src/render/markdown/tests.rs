@@ -5,7 +5,12 @@ use crate::model::{
 };
 
 fn doc(blocks: Vec<Block>) -> String {
-    document_to_markdown(&Document { blocks, notes: Vec::new(), assets: Vec::new() })
+    document_to_markdown(&Document {
+        blocks,
+        source_units: Vec::new(),
+        notes: Vec::new(),
+        assets: Vec::new(),
+    })
 }
 
 fn styled(text: &str, style: Style) -> Inline {
@@ -563,6 +568,7 @@ fn footnotes() {
             Inline::plain(" More."),
             Inline::NoteRef("a".into()),
         ])],
+        source_units: Vec::new(),
         notes: vec![
             note("a", vec![Block::Paragraph(vec![Inline::plain("Second note.")])]),
             note(
@@ -588,6 +594,7 @@ fn empty_and_unreferenced_notes() {
             Inline::plain("Text"),
             Inline::NoteRef("empty".into()),
         ])],
+        source_units: Vec::new(),
         notes: vec![
             note("empty", vec![Block::Paragraph(vec![])]),
             note("orphan", vec![Block::Paragraph(vec![Inline::plain("Kept.")])]),
@@ -601,6 +608,7 @@ fn empty_and_unreferenced_notes() {
 fn duplicate_note_ids_render_one_definition() {
     let md = document_to_markdown(&Document {
         blocks: vec![Block::Paragraph(vec![Inline::plain("Text"), Inline::NoteRef("a".into())])],
+        source_units: Vec::new(),
         notes: vec![
             note("a", vec![Block::Paragraph(vec![Inline::plain("First wins.")])]),
             note("a", vec![Block::Paragraph(vec![Inline::plain("Duplicate dropped.")])]),
@@ -614,6 +622,7 @@ fn duplicate_note_ids_render_one_definition() {
 fn blank_duplicate_note_does_not_suppress_a_later_definition() {
     let md = document_to_markdown(&Document {
         blocks: vec![Block::Paragraph(vec![Inline::plain("Text"), Inline::NoteRef("a".into())])],
+        source_units: Vec::new(),
         notes: vec![
             note("a", vec![Block::Paragraph(Vec::new())]),
             note("a", vec![Block::Paragraph(vec![Inline::plain("Usable.")])]),

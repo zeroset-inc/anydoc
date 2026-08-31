@@ -11,7 +11,7 @@ use super::xlsx::{
 };
 use super::{error_literal, rk_number};
 use crate::error::ConvertError;
-use crate::model::{Block, Document, Inline};
+use crate::model::{Block, Document, Inline, SourceUnit, SourceUnitKind, SourceUnitStatus};
 use crate::package::limits;
 use crate::package::relationships::{read_rels, rel_type, rels_part_for};
 use crate::package::{Package, path};
@@ -77,7 +77,8 @@ pub(super) fn parse(pkg: &mut Package, wb_part: &str) -> Result<Document, Conver
     let mut failed = 0usize;
     // One budget for the workbook, so sheets cannot multiply the cap.
     let mut slots = 0u64;
-    for (name, part) in &sheets {
+    for (sheet_index, (name, part)) in sheets.iter().enumerate() {
+        let start_block = doc.blocks.len();
         let content =
             pkg.optional_part(part)?.map(|bytes| read_sheet(&bytes, &shared, &xfs, date1904));
         let mut content = match content {
@@ -86,27 +87,54 @@ pub(super) fn parse(pkg: &mut Package, wb_part: &str) -> Result<Document, Conver
             Some(Err(e)) => {
                 log::warn!("skipping unreadable sheet {name:?}: {e}");
                 failed += 1;
+                doc.source_units.push(skipped_sheet(sheet_index, name, start_block));
                 continue;
             }
             None => {
                 log::warn!("skipping unreadable sheet {name:?}");
                 failed += 1;
+                doc.source_units.push(skipped_sheet(sheet_index, name, start_block));
                 continue;
             }
         };
         content.checkboxes = read_vml_checkboxes(pkg, part)?;
-        let Some(table) = build_table(content, &mut slots)? else {
-            continue;
-        };
-        if multi_sheet {
+        let table = build_table(content, &mut slots)?;
+        if multi_sheet && table.is_some() {
             doc.blocks.push(Block::heading(2, vec![Inline::plain(name.clone())]));
         }
-        doc.blocks.push(Block::Table(table));
+        if let Some(table) = table {
+            doc.blocks.push(Block::Table(table));
+        }
+        doc.source_units.push(SourceUnit {
+            kind: SourceUnitKind::Sheet,
+            ordinal: sheet_index + 1,
+            name: Some(name.clone()),
+            status: if doc.blocks.len() == start_block {
+                SourceUnitStatus::Empty
+            } else {
+                SourceUnitStatus::Parsed
+            },
+            reason: None,
+            start_block,
+            end_block: doc.blocks.len(),
+        });
     }
     if !sheets.is_empty() && failed == sheets.len() {
         return Err(ConvertError::malformed("no sheet in the workbook could be read"));
     }
     Ok(doc)
+}
+
+fn skipped_sheet(index: usize, name: &str, at: usize) -> SourceUnit {
+    SourceUnit {
+        kind: SourceUnitKind::Sheet,
+        ordinal: index + 1,
+        name: Some(name.to_string()),
+        status: SourceUnitStatus::Skipped,
+        reason: Some("worksheet_unreadable".to_string()),
+        start_block: at,
+        end_block: at,
+    }
 }
 
 /// Read an optional binary part under the unified recovery policy: absent or

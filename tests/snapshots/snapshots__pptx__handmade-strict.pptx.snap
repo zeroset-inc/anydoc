@@ -2,6 +2,10 @@
 source: tests/snapshots.rs
 expression: output
 ---
+<!-- anydoc:source-unit-start kind=slide ordinal=1 status=parsed -->
+
 ## Strict slide title
 
 Strict body text
+
+<!-- anydoc:source-unit-end kind=slide ordinal=1 status=parsed -->

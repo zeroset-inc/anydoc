@@ -11,6 +11,7 @@ from typing import Literal
 
 from anydoc._anydoc import (
     Asset,
+    AssetRetentionPolicy,
     Block,
     Cell,
     CellSlot,
@@ -27,13 +28,20 @@ from anydoc._anydoc import (
     NeedsOcrError,
     Note,
     ResourceLimitError,
+    RenderedPart,
+    RenderedParts,
+    SourceUnit,
+    SpreadsheetAssetManifest,
+    SpreadsheetAssetSourceUnit,
     Style,
     Table,
     UnsupportedError,
     format_from_bytes,
     format_from_extension,
     format_from_path,
+    extract_spreadsheet_assets,
     to_document,
+    to_rendered_parts,
 )
 from anydoc._anydoc import to_markdown as _to_markdown
 from anydoc._anydoc import to_markdown_bytes as _to_markdown_bytes
@@ -62,6 +70,7 @@ def to_markdown(
     ocr: Ocr = "reject",
     api_key: "str | None" = None,
     api_url: "str | None" = None,
+    asset_policy: "AssetRetentionPolicy | None" = None,
 ) -> str:
     """Convert a document file to Markdown. The format is detected from the
     file content; the extension is the fallback for signature-less formats
@@ -71,7 +80,7 @@ def to_markdown(
     keyless; `api_url` to `FIRECRAWL_API_URL`, then
     `https://api.firecrawl.dev`."""
     try:
-        return _to_markdown(path)
+        return _to_markdown(path, asset_policy=asset_policy)
     except NeedsOcrError:
         if ocr != "hosted":
             raise
@@ -86,13 +95,14 @@ def to_markdown_bytes(
     ocr: Ocr = "reject",
     api_key: "str | None" = None,
     api_url: "str | None" = None,
+    asset_policy: "AssetRetentionPolicy | None" = None,
 ) -> str:
     """Convert an in-memory document to Markdown. Without a format, it is
     detected from the content, which signature-less formats (CSV) have to
     name explicitly. `ocr`, `api_key` and `api_url` are as for
     `to_markdown`."""
     try:
-        return _to_markdown_bytes(data, format)
+        return _to_markdown_bytes(data, format, asset_policy=asset_policy)
     except NeedsOcrError:
         if ocr != "hosted":
             raise
@@ -175,13 +185,14 @@ def _describe(status: int, detail: str, keyed: bool) -> str:
 
 def _version() -> str:
     try:
-        return version("firecrawl-anydoc")
+        return version("zeroset-anydoc")
     except PackageNotFoundError:
         return "unknown"
 
 
 __all__ = [
     "Asset",
+    "AssetRetentionPolicy",
     "Block",
     "Cell",
     "CellSlot",
@@ -201,13 +212,20 @@ __all__ = [
     "Note",
     "Ocr",
     "ResourceLimitError",
+    "RenderedPart",
+    "RenderedParts",
+    "SourceUnit",
+    "SpreadsheetAssetManifest",
+    "SpreadsheetAssetSourceUnit",
     "Style",
     "Table",
     "UnsupportedError",
     "format_from_bytes",
     "format_from_extension",
     "format_from_path",
+    "extract_spreadsheet_assets",
     "to_document",
+    "to_rendered_parts",
     "to_markdown",
     "to_markdown_bytes",
 ]

@@ -2,6 +2,8 @@
 source: tests/snapshots.rs
 expression: output
 ---
+<!-- anydoc:source-unit-start kind=slide ordinal=1 status=parsed -->
+
 Kicker before the title
 
 ## Title placed second
@@ -9,3 +11,5 @@ Kicker before the title
 Body after the title
 
 Quarterly numbers
+
+<!-- anydoc:source-unit-end kind=slide ordinal=1 status=parsed -->

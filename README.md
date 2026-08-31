@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/anydoc.svg)](https://crates.io/crates/anydoc)
 [![npm](https://img.shields.io/npm/v/@firecrawl/anydoc.svg)](https://www.npmjs.com/package/@firecrawl/anydoc)
-[![PyPI](https://img.shields.io/pypi/v/firecrawl-anydoc.svg)](https://pypi.org/project/firecrawl-anydoc/)
+[![PyPI](https://img.shields.io/pypi/v/zeroset-anydoc.svg)](https://pypi.org/project/zeroset-anydoc/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![skills.sh](https://skills.sh/b/firecrawl/anydoc)](https://skills.sh/firecrawl/anydoc)
 
@@ -62,7 +62,7 @@ const document = await toDocument(bytes);
 ### Python
 
 ```bash
-pip install firecrawl-anydoc
+pip install zeroset-anydoc
 ```
 
 ```python
@@ -124,6 +124,20 @@ let markdown = anydoc::to_markdown_bytes(&bytes, anydoc::Format::Csv)?;
 
 // Or stop at the document model, which also carries embedded assets:
 let document = anydoc::to_document(&bytes, None)?;
+
+// Preserve ordered slide/sheet provenance and asset ownership:
+let rendered = anydoc::render_document(&document);
+
+// Bound retained payloads without dropping asset identity or provenance:
+let policy = anydoc::AssetRetentionPolicy {
+    max_unique_assets: Some(200),
+    max_total_bytes: Some(32 * 1024 * 1024),
+    max_asset_bytes: Some(32 * 1024 * 1024),
+};
+let bounded = anydoc::to_document_with_asset_policy(&bytes, None, policy)?;
+
+// Inspect XLSX/XLSM DrawingML ownership without parsing cell content:
+let manifest = anydoc::extract_spreadsheet_assets(&bytes)?;
 ```
 
 ## Features
@@ -131,7 +145,8 @@ let document = anydoc::to_document(&bytes, None)?;
 - **One output for every format.** Each format parses into a shared document model and renders through a single Markdown serializer, so escaping, tables, heading anchors, and footnotes behave identically whether the input was a `.doc` from 2003 or a `.pptx` from yesterday.
 - **Full document structure.** Headings with anchors, bold/italic/strikethrough, inline code and code blocks, links and internal cross-references, bulleted/numbered/nested/task lists with the source's own numbering, tables with merged cells and header rows, block quotes, footnotes and endnotes, and speaker notes.
 - **Equations as LaTeX.** Word and PowerPoint (OMML), OpenDocument and EPUB (MathML), and RTF equations convert to GitHub-flavored math: `$...$` inline and `$$` blocks.
-- **Embedded assets.** Images and embedded objects render as their alt text in the Markdown, and the raw bytes stay available on the document model, tagged with their media type. Images with an external URL become ordinary Markdown images.
+- **Ordered source provenance.** Slides and sheets remain stable, one-based source units, including empty and skipped units. `render_document_parts` maps Markdown and embedded assets back to those units.
+- **Embedded assets.** Images and embedded objects render as their alt text in the Markdown. The default document retains their bytes; caller-selected `AssetRetentionPolicy` limits can omit payloads while preserving ids, sizes, provenance, and structured omission reasons. XLSX/XLSM DrawingML images retain sheet ownership.
 - **Content-based format detection.** The format is read from the bytes themselves (PDF header, RTF open group, OLE stream names, ZIP package mimetype), so mislabeled files still convert correctly.
 - **Fast.** Pure Rust, no ML models, no external services. Median conversion time is under 5ms per document.
 - **Bindings that stay out of the way.** Node.js conversion runs on the libuv thread pool and never blocks the event loop; Python releases the GIL so other threads keep running. TypeScript types and Python stubs ship with the packages.

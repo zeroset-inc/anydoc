@@ -11,7 +11,7 @@ use super::xlsx::{
 };
 use super::{error_literal, rk_number};
 use crate::error::ConvertError;
-use crate::model::{Block, Document, Inline};
+use crate::model::{Block, Document, Inline, SourceUnit, SourceUnitKind, SourceUnitStatus};
 use crate::package::limits;
 use crate::shared::binary::{get_u16, get_u32, read_ole_stream, utf16le_units};
 use crate::shared::officeart;
@@ -65,19 +65,42 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     let mut failed = 0usize;
     // One budget for the workbook, so sheets cannot multiply the cap.
     let mut slots = 0u64;
-    for sheet in &visible {
+    for (sheet_index, sheet) in visible.iter().enumerate() {
+        let start_block = doc.blocks.len();
         let Some(content) = read_sheet(&data, &globals, sheet.offset, &mut records)? else {
             log::warn!("skipping unreadable sheet {:?}", sheet.name);
             failed += 1;
+            doc.source_units.push(SourceUnit {
+                kind: SourceUnitKind::Sheet,
+                ordinal: sheet_index + 1,
+                name: Some(sheet.name.clone()),
+                status: SourceUnitStatus::Skipped,
+                reason: Some("worksheet_unreadable".to_string()),
+                start_block,
+                end_block: start_block,
+            });
             continue;
         };
-        let Some(table) = build_table(content, &mut slots)? else {
-            continue;
-        };
-        if multi_sheet {
+        let table = build_table(content, &mut slots)?;
+        if multi_sheet && table.is_some() {
             doc.blocks.push(Block::heading(2, vec![Inline::plain(sheet.name.clone())]));
         }
-        doc.blocks.push(Block::Table(table));
+        if let Some(table) = table {
+            doc.blocks.push(Block::Table(table));
+        }
+        doc.source_units.push(SourceUnit {
+            kind: SourceUnitKind::Sheet,
+            ordinal: sheet_index + 1,
+            name: Some(sheet.name.clone()),
+            status: if doc.blocks.len() == start_block {
+                SourceUnitStatus::Empty
+            } else {
+                SourceUnitStatus::Parsed
+            },
+            reason: None,
+            start_block,
+            end_block: doc.blocks.len(),
+        });
     }
     if !visible.is_empty() && failed == visible.len() {
         return Err(ConvertError::malformed("no sheet in the workbook could be read"));

@@ -4,10 +4,14 @@
 //! and merge regions are remapped onto the surviving grid.
 
 use super::controls::{Checkboxes, cell_inlines, read_vml_checkboxes};
+use super::images::{SheetImage, XlsxImages};
 use super::numfmt::{DateParts, NumberFormat, Rendered, builtin_code};
 use super::{format_duration_days, format_float, format_time_of_day};
 use crate::error::ConvertError;
-use crate::model::{Block, Cell, Document, GridBuilder, Inline, Table, TableKind};
+use crate::model::{
+    Block, Cell, Document, GridBuilder, Inline, SourceUnit, SourceUnitKind, SourceUnitStatus,
+    Table, TableKind,
+};
 use crate::package::limits;
 use crate::package::relationships::{Relationships, read_rels, rel_type, rels_part_for};
 use crate::package::xml::{Element, ns};
@@ -25,7 +29,11 @@ pub(super) const SHARED_STRINGS_REL: &str =
 pub(super) const MAX_ROWS: u32 = 1_048_576;
 pub(super) const MAX_COLS: u32 = 16_384;
 
-pub(super) fn parse(pkg: &mut Package, wb_part: &str) -> Result<Document, ConvertError> {
+pub(super) fn parse(
+    pkg: &mut Package,
+    wb_part: &str,
+    mut extracted_images: XlsxImages,
+) -> Result<Document, ConvertError> {
     let workbook = pkg.required_xml_part(wb_part)?;
     // Any OOXML main part resolves here; a document or presentation would
     // otherwise convert to an empty workbook.
@@ -48,7 +56,7 @@ pub(super) fn parse(pkg: &mut Package, wb_part: &str) -> Result<Document, Conver
 
     // Visible sheets in workbook order; hidden and veryHidden sheets are
     // omitted entirely, heading included.
-    let mut sheets: Vec<(String, String)> = Vec::new();
+    let mut sheets: Vec<(String, Option<String>)> = Vec::new();
     for sheet in workbook
         .first_descendant(ns::SML, "sheets")
         .into_iter()
@@ -58,16 +66,20 @@ pub(super) fn parse(pkg: &mut Package, wb_part: &str) -> Result<Document, Conver
             continue;
         }
         let name = sheet.attr_unqualified("name").unwrap_or_default().to_string();
-        let Some(target) =
-            sheet.attr_qualified(ns::R, "id").and_then(|rid| wb_rels.internal_target(rid))
-        else {
-            log::warn!("skipping sheet {name:?} with no worksheet relationship");
-            continue;
-        };
-        match path::resolve(wb_part, target) {
-            Ok(t) => sheets.push((name, t.path)),
-            Err(e) => log::warn!("skipping sheet {name:?} with unresolvable target: {e}"),
+        let target = sheet
+            .attr_qualified(ns::R, "id")
+            .and_then(|rid| wb_rels.internal_target(rid))
+            .and_then(|target| match path::resolve(wb_part, target) {
+                Ok(target) => Some(target.path),
+                Err(e) => {
+                    log::warn!("skipping sheet {name:?} with unresolvable target: {e}");
+                    None
+                }
+            });
+        if target.is_none() {
+            log::warn!("skipping sheet {name:?} with no readable worksheet relationship");
         }
+        sheets.push((name, target));
     }
 
     let multi_sheet = sheets.len() > 1;
@@ -75,27 +87,67 @@ pub(super) fn parse(pkg: &mut Package, wb_part: &str) -> Result<Document, Conver
     let mut failed = 0usize;
     // One budget for the workbook, so sheets cannot multiply the cap.
     let mut slots = 0u64;
-    for (name, part) in &sheets {
-        let worksheet = pkg.optional_xml_part(part)?;
+    for (sheet_index, (name, part)) in sheets.iter().enumerate() {
+        let start_block = doc.blocks.len();
+        let sheet_images = extracted_images.by_sheet.remove(name).unwrap_or_default();
+        let drawing_degraded = extracted_images.degraded_sheets.remove(name);
+        let worksheet = match part {
+            Some(part) => pkg.optional_xml_part(part)?,
+            None => None,
+        };
         let Some(worksheet) = worksheet.as_ref().and_then(|r| r.find(ns::SML, "worksheet")) else {
             log::warn!("skipping unreadable sheet {name:?}");
-            failed += 1;
+            append_images(&mut doc.blocks, sheet_images);
+            if doc.blocks.len() == start_block {
+                failed += 1;
+            }
+            doc.source_units.push(SourceUnit {
+                kind: SourceUnitKind::Sheet,
+                ordinal: sheet_index + 1,
+                name: Some(name.clone()),
+                status: SourceUnitStatus::Skipped,
+                reason: Some("worksheet_unreadable".to_string()),
+                start_block,
+                end_block: doc.blocks.len(),
+            });
             continue;
         };
         let mut content = read_sheet(worksheet, &shared, &styles, date1904);
-        content.checkboxes = read_vml_checkboxes(pkg, part)?;
-        let Some(table) = build_table(content, &mut slots)? else {
-            continue;
-        };
-        if multi_sheet {
+        content.checkboxes = read_vml_checkboxes(pkg, part.as_deref().expect("worksheet loaded"))?;
+        let table = build_table(content, &mut slots)?;
+        let has_content = table.is_some() || !sheet_images.is_empty();
+        if multi_sheet && has_content {
             doc.blocks.push(Block::heading(2, vec![Inline::plain(name.clone())]));
         }
-        doc.blocks.push(Block::Table(table));
+        if let Some(table) = table {
+            doc.blocks.push(Block::Table(table));
+        }
+        append_images(&mut doc.blocks, sheet_images);
+        doc.source_units.push(SourceUnit {
+            kind: SourceUnitKind::Sheet,
+            ordinal: sheet_index + 1,
+            name: Some(name.clone()),
+            status: if drawing_degraded {
+                SourceUnitStatus::Skipped
+            } else if has_content {
+                SourceUnitStatus::Parsed
+            } else {
+                SourceUnitStatus::Empty
+            },
+            reason: drawing_degraded.then(|| "worksheet_drawing_unreadable".to_string()),
+            start_block,
+            end_block: doc.blocks.len(),
+        });
     }
     if !sheets.is_empty() && failed == sheets.len() {
         return Err(ConvertError::malformed("no sheet in the workbook could be read"));
     }
+    doc.assets = extracted_images.assets.assets;
     Ok(doc)
+}
+
+fn append_images(blocks: &mut Vec<Block>, images: Vec<SheetImage>) {
+    blocks.extend(images.into_iter().map(|image| Block::Paragraph(vec![image.into_inline()])));
 }
 
 /// Part name for a workbook-level sibling: the relationship of the given

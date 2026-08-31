@@ -8,7 +8,9 @@ mod table;
 #[cfg(test)]
 mod tests;
 
-use crate::model::{Block, Document, Inline, List, MarkerKind, Note, TableKind, inlines_are_empty};
+use crate::model::{
+    AssetId, Block, Document, Inline, List, MarkerKind, Note, TableKind, inlines_are_empty,
+};
 use anchors::{AnchorMap, resolve_anchors};
 use escape::{EscapeOpts, InlineContext, backtick_fence, escape_text};
 use inline::render_inlines;
@@ -37,15 +39,104 @@ pub(crate) struct Ctx {
     anchors: AnchorMap,
 }
 
+/// Markdown and provenance for one ordered range of a rendered document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedPart {
+    /// Markdown for this range, without source-unit boundary comments.
+    pub markdown: String,
+    /// Index into [`Document::source_units`], or `None` for unowned content.
+    pub source_unit_index: Option<usize>,
+    /// First top-level block covered by this part.
+    pub start_block: usize,
+    /// Exclusive top-level block bound covered by this part.
+    pub end_block: usize,
+    /// Distinct embedded assets referenced below this range, in first-use order.
+    pub asset_ids: Vec<AssetId>,
+}
+
+/// Complete Markdown together with its ordered source-provenance parts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedDocument {
+    /// Complete Markdown, including source-unit markers and note definitions.
+    pub markdown: String,
+    /// Ordered source-unit and unowned block ranges.
+    pub parts: Vec<RenderedPart>,
+}
+
 pub fn document_to_markdown(doc: &Document) -> String {
     let rc = Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc) };
-    let mut parts: Vec<String> = doc.blocks.iter().filter_map(|b| render_block(b, &rc)).collect();
+    render_document_markdown(doc, &rc)
+}
+
+/// Render a parsed document and expose the source and asset provenance of each
+/// ordered part without parsing it a second time.
+pub fn render_document(doc: &Document) -> RenderedDocument {
+    let rc = Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc) };
+    RenderedDocument {
+        markdown: render_document_markdown(doc, &rc),
+        parts: render_document_parts_with_context(doc, &rc),
+    }
+}
+
+/// Render only the ordered Markdown/provenance parts of a parsed document.
+pub fn render_document_parts(doc: &Document) -> Vec<RenderedPart> {
+    let rc = Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc) };
+    render_document_parts_with_context(doc, &rc)
+}
+
+fn valid_source_units(doc: &Document) -> Vec<(usize, &crate::model::SourceUnit)> {
+    let mut units = Vec::new();
+    let mut prior_end = 0;
+    for (index, unit) in doc.source_units.iter().enumerate() {
+        if unit.start_block <= unit.end_block
+            && unit.end_block <= doc.blocks.len()
+            && unit.start_block >= prior_end
+        {
+            prior_end = unit.end_block;
+            units.push((index, unit));
+        }
+    }
+    units
+}
+
+fn render_document_markdown(doc: &Document, rc: &Ctx) -> String {
+    let units = valid_source_units(doc);
+    let mut parts = Vec::new();
+    for block_index in 0..=doc.blocks.len() {
+        for unit in units
+            .iter()
+            .map(|(_, unit)| *unit)
+            .filter(|unit| unit.start_block < unit.end_block && unit.end_block == block_index)
+            .rev()
+        {
+            parts.push(render_source_unit(unit, false));
+        }
+        for unit in
+            units.iter().map(|(_, unit)| *unit).filter(|unit| unit.start_block == block_index)
+        {
+            parts.push(render_source_unit(unit, true));
+            if unit.start_block == unit.end_block {
+                parts.push(render_source_unit(unit, false));
+            }
+        }
+        if let Some(block) = doc.blocks.get(block_index)
+            && let Some(rendered) = render_block(block, rc)
+        {
+            parts.push(rendered);
+        }
+    }
+    parts.extend(render_note_definitions(doc, rc));
+    finish_markdown(parts.join("\n\n"))
+}
+
+fn render_note_definitions(doc: &Document, rc: &Ctx) -> Vec<String> {
+    let mut parts = Vec::new();
     let mut rendered_defs: HashSet<usize> = HashSet::new();
     let mut ordered: Vec<(&Note, usize)> =
         doc.notes.iter().filter_map(|n| rc.nums.get(&n.id).map(|&num| (n, num))).collect();
     ordered.sort_by_key(|(_, num)| *num);
     for (note, num) in ordered {
-        let body = render_blocks(&note.blocks, &rc);
+        let body = render_blocks(&note.blocks, rc);
         if body.is_empty() {
             continue;
         }
@@ -66,11 +157,185 @@ pub fn document_to_markdown(doc: &Document) -> String {
         }
         parts.push(s);
     }
-    let mut out = parts.join("\n\n");
+    parts
+}
+
+fn finish_markdown(mut out: String) -> String {
     if !out.is_empty() {
         out.push('\n');
     }
     out
+}
+
+fn render_document_parts_with_context(doc: &Document, rc: &Ctx) -> Vec<RenderedPart> {
+    let units = valid_source_units(doc);
+    let mut parts = Vec::new();
+    let mut all_seen = HashSet::new();
+    let mut cursor = 0;
+    for (unit_index, unit) in units {
+        if cursor < unit.start_block {
+            parts.push(render_part(doc, rc, None, cursor, unit.start_block, &mut all_seen));
+        }
+        parts.push(render_part(
+            doc,
+            rc,
+            Some(unit_index),
+            unit.start_block,
+            unit.end_block,
+            &mut all_seen,
+        ));
+        cursor = unit.end_block;
+    }
+    if cursor < doc.blocks.len() || parts.is_empty() {
+        parts.push(render_part(doc, rc, None, cursor, doc.blocks.len(), &mut all_seen));
+    }
+
+    let note_markdown = render_note_definitions(doc, rc).join("\n\n");
+    let mut trailing_assets = Vec::new();
+    for note in &doc.notes {
+        collect_asset_ids(&note.blocks, &mut all_seen, &mut trailing_assets);
+    }
+    for asset in &doc.assets {
+        if all_seen.insert(asset.id) {
+            trailing_assets.push(asset.id);
+        }
+    }
+    if !note_markdown.is_empty() || !trailing_assets.is_empty() {
+        if !parts.last().is_some_and(|part| {
+            part.source_unit_index.is_none() && part.end_block == doc.blocks.len()
+        }) {
+            parts.push(RenderedPart {
+                markdown: String::new(),
+                source_unit_index: None,
+                start_block: doc.blocks.len(),
+                end_block: doc.blocks.len(),
+                asset_ids: Vec::new(),
+            });
+        }
+        let part = parts.last_mut().expect("trailing part exists");
+        if !note_markdown.is_empty() {
+            if !part.markdown.is_empty() {
+                part.markdown.push_str("\n\n");
+            }
+            part.markdown.push_str(&note_markdown);
+        }
+        for id in trailing_assets {
+            if !part.asset_ids.contains(&id) {
+                part.asset_ids.push(id);
+            }
+        }
+    }
+    for part in &mut parts {
+        part.markdown = finish_markdown(std::mem::take(&mut part.markdown));
+    }
+    parts
+}
+
+fn render_part(
+    doc: &Document,
+    rc: &Ctx,
+    source_unit_index: Option<usize>,
+    start_block: usize,
+    end_block: usize,
+    all_seen: &mut HashSet<AssetId>,
+) -> RenderedPart {
+    let blocks = &doc.blocks[start_block..end_block];
+    let mut asset_ids = Vec::new();
+    collect_asset_ids(blocks, all_seen, &mut asset_ids);
+    RenderedPart {
+        markdown: render_blocks(blocks, rc),
+        source_unit_index,
+        start_block,
+        end_block,
+        asset_ids,
+    }
+}
+
+fn collect_asset_ids(blocks: &[Block], all_seen: &mut HashSet<AssetId>, output: &mut Vec<AssetId>) {
+    fn walk_inlines(inlines: &[Inline], found: &mut impl FnMut(AssetId)) {
+        for inline in inlines {
+            match inline {
+                Inline::Link { content, .. } => walk_inlines(content, found),
+                Inline::Image { source: crate::model::ImageSource::Asset(id), .. } => found(*id),
+                _ => {}
+            }
+        }
+    }
+    let mut found = |id| {
+        if all_seen.insert(id) {
+            output.push(id);
+        }
+    };
+    fn walk_blocks(blocks: &[Block], found: &mut impl FnMut(AssetId)) {
+        for block in blocks {
+            match block {
+                Block::Heading { content, .. } | Block::Paragraph(content) => {
+                    walk_inlines(content, found)
+                }
+                Block::List(list) => {
+                    for item in &list.items {
+                        walk_blocks(&item.blocks, found);
+                    }
+                }
+                Block::Table(table) => {
+                    for row in &table.grid {
+                        for slot in row {
+                            if let crate::model::CellSlot::Origin(cell) = slot {
+                                walk_blocks(&cell.blocks, found);
+                            }
+                        }
+                    }
+                }
+                Block::BlockQuote(nested) => walk_blocks(nested, found),
+                Block::CodeBlock { .. } | Block::Rule | Block::Math(_) => {}
+            }
+        }
+    }
+    walk_blocks(blocks, &mut found);
+}
+
+fn render_source_unit(unit: &crate::model::SourceUnit, start: bool) -> String {
+    let kind = match unit.kind {
+        crate::model::SourceUnitKind::Slide => "slide",
+        crate::model::SourceUnitKind::Sheet => "sheet",
+    };
+    let boundary = if start { "start" } else { "end" };
+    let status = match unit.status {
+        crate::model::SourceUnitStatus::Parsed => "parsed",
+        crate::model::SourceUnitStatus::Empty => "empty",
+        crate::model::SourceUnitStatus::Skipped => "skipped",
+    };
+    let mut marker = format!(
+        "<!-- anydoc:source-unit-{boundary} kind={kind} ordinal={} status={status} ",
+        unit.ordinal
+    );
+    if start && let Some(name) = &unit.name {
+        marker.push_str("name=");
+        marker.push_str(&percent_encode(name));
+        marker.push(' ');
+    }
+    if start && let Some(reason) = &unit.reason {
+        marker.push_str("reason=");
+        marker.push_str(&percent_encode(reason));
+        marker.push(' ');
+    }
+    marker.push_str("-->");
+    marker
+}
+
+fn percent_encode(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    encoded
 }
 
 /// Number notes in first-reference order; unreferenced notes follow at the

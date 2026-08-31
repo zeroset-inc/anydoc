@@ -7,8 +7,8 @@ mod cascade;
 
 use crate::error::ConvertError;
 use crate::model::{
-    Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget, Style, TableKind,
-    inlines_are_empty,
+    Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget, SourceUnit,
+    SourceUnitKind, SourceUnitStatus, Style, TableKind, inlines_are_empty,
 };
 use crate::package::relationships::{
     RelTarget, Relationships, TargetMode, read_rels, rel_target_bytes, rel_type, rels_part_for,
@@ -50,7 +50,10 @@ struct MasterInfo {
     placeholders: Vec<Placeholder>,
 }
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     let pkg = match Package::open(bytes) {
         Ok(p) => p,
         Err(e) => return Err(probe_ole(bytes).unwrap_or(e)),
@@ -88,10 +91,11 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         ));
     }
 
-    let assets = RefCell::new(AssetSink::new());
+    let assets = RefCell::new(AssetSink::with_policy(asset_policy));
     let mut layouts: HashMap<String, LayoutInfo> = HashMap::new();
     let mut masters: HashMap<String, MasterInfo> = HashMap::new();
     let mut blocks: Vec<Block> = Vec::new();
+    let mut source_units = Vec::with_capacity(slide_paths.len());
     let mut failed = 0usize;
     let instance_counter = StdCell::new(0u64);
     // Every slide has a start anchor id so internal slide-to-slide links
@@ -118,11 +122,13 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         .collect();
 
     for (slide_index, slide_path) in slide_paths.iter().enumerate() {
+        let start_block = blocks.len();
         let tree = match pkg.borrow_mut().optional_xml_part(slide_path)? {
             Some(t) => t,
             None => {
                 log::warn!("skipping unusable slide {slide_path}");
                 failed += 1;
+                source_units.push(skipped_slide(slide_index, start_block, "slide_unreadable"));
                 continue;
             }
         };
@@ -133,6 +139,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         else {
             log::warn!("skipping slide {slide_path}: no shape tree");
             failed += 1;
+            source_units.push(skipped_slide(slide_index, start_block, "slide_shape_tree_missing"));
             continue;
         };
         let slide_rels = &all_rels[slide_index];
@@ -207,13 +214,38 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
                 blocks.push(Block::BlockQuote(notes_blocks));
             }
         }
+        source_units.push(SourceUnit {
+            kind: SourceUnitKind::Slide,
+            ordinal: slide_index + 1,
+            name: None,
+            status: if blocks.len() == start_block {
+                SourceUnitStatus::Empty
+            } else {
+                SourceUnitStatus::Parsed
+            },
+            reason: None,
+            start_block,
+            end_block: blocks.len(),
+        });
     }
     if failed == slide_paths.len() {
         return Err(ConvertError::malformed("no slide in the presentation could be read"));
     }
 
     let assets = std::mem::take(&mut assets.borrow_mut().assets);
-    Ok(Document { blocks, notes: Vec::new(), assets })
+    Ok(Document { blocks, source_units, notes: Vec::new(), assets })
+}
+
+fn skipped_slide(index: usize, at: usize, reason: &str) -> SourceUnit {
+    SourceUnit {
+        kind: SourceUnitKind::Slide,
+        ordinal: index + 1,
+        name: None,
+        status: SourceUnitStatus::Skipped,
+        reason: Some(reason.to_string()),
+        start_block: at,
+        end_block: at,
+    }
 }
 
 fn rel_target_of_type(rels: &Relationships, base: &str, rel_type: &str) -> Option<String> {
@@ -574,14 +606,14 @@ fn parse_graphic_frame(
         let alt =
             if name.is_empty() { format!("Embedded object: {prog_id}") } else { name.to_string() };
         let source = match ole.attr_qualified(ns::R, "id") {
-            Some(rid) => match ctx.rel_part(rid)? {
-                Some((part, bytes)) => Some(ImageSource::Asset(ctx.assets.borrow_mut().add(
-                    "application/vnd.ms-ole-object".into(),
-                    part,
-                    &bytes,
-                )?)),
-                None => None,
-            },
+            Some(rid) => crate::shared::assets::rel_asset_source(
+                ctx.pkg,
+                ctx.rels,
+                ctx.base_part,
+                ctx.assets,
+                rid,
+                "application/vnd.ms-ole-object",
+            )?,
             None => None,
         };
         blocks.push(Block::Paragraph(vec![Inline::Image {

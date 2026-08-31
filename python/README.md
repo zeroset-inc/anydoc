@@ -1,6 +1,6 @@
-# firecrawl-anydoc
+# zeroset-anydoc
 
-[![PyPI](https://img.shields.io/pypi/v/firecrawl-anydoc.svg)](https://pypi.org/project/firecrawl-anydoc/)
+[![PyPI](https://img.shields.io/pypi/v/zeroset-anydoc.svg)](https://pypi.org/project/zeroset-anydoc/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/firecrawl/anydoc/blob/main/LICENSE)
 
 Convert Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and PDF files into clean GitHub-Flavored Markdown. Python bindings for the [anydoc](https://github.com/firecrawl/anydoc) Rust crate, built by [Firecrawl](https://firecrawl.dev). Also available as a hosted API through [Firecrawl Parse](https://firecrawl.dev/parse), which adds our OCR models for the scanned pages anydoc can't read on its own.
@@ -8,10 +8,10 @@ Convert Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and PDF files int
 Every format parses into one shared document model and renders through a single Markdown serializer, so headings, tables, lists, and footnotes come out the same no matter which format goes in. Conversion releases the GIL, so other threads keep running. Type stubs ship with the package.
 
 ```bash
-pip install firecrawl-anydoc
+pip install zeroset-anydoc
 ```
 
-The package installs as `firecrawl-anydoc` and imports as `anydoc`.
+The fork installs as `zeroset-anydoc` and imports as `anydoc`.
 
 ## Supported formats
 
@@ -42,6 +42,15 @@ markdown = anydoc.to_markdown_bytes(data, "csv")
 
 # Or stop at the document model, which also carries embedded assets:
 document = anydoc.to_document(data)
+
+# Slides and sheets remain ordered source units; rendered parts retain their
+# source-unit and embedded-asset ownership.
+for part in document.rendered_parts:
+    unit = document.source_units[part.source_unit_index] if part.source_unit_index is not None else None
+
+# Omit large payloads while retaining asset identity and provenance.
+policy = anydoc.AssetRetentionPolicy(max_unique_assets=200, max_total_bytes=32 * 1024 * 1024)
+bounded = anydoc.to_document(data, asset_policy=policy)
 ```
 
 ## Scanned pages
@@ -90,7 +99,7 @@ anydoc.format_from_path("report.odt")  # 'odt'
 
 ## Images and embedded objects
 
-Markdown cannot embed bytes, so an embedded image renders as its alt text while the bytes stay on `document.assets`, tagged with a media type and the part they came from. Images that carry an external URL render as ordinary Markdown images.
+Markdown cannot embed bytes, so an embedded image renders as its alt text while its record stays on `document.assets`, tagged with a media type and source part. By default `asset.data` carries the bytes. An `AssetRetentionPolicy` can omit payloads by unique count, aggregate bytes, or individual bytes while preserving asset ids, byte lengths, omission reasons, rendered-part ownership, and XLSX/XLSM sheet provenance.
 
 Full behavior notes and benchmarks live in the [repository README](https://github.com/firecrawl/anydoc#readme).
 

@@ -398,14 +398,14 @@ jobs:
       - name: Install wheel and run tests
         if: ${{ !matrix.image && !matrix.macos_x64 }}
         run: |
-          python -m pip install --no-index --find-links dist firecrawl-anydoc
+          python -m pip install --no-index --find-links dist zeroset-anydoc
           python -m unittest discover -s python/tests
       - name: Install wheel and run tests in container
         if: ${{ matrix.image }}
         run: >
           docker run --rm -v ${{ github.workspace }}:/build -w /build
           ${{ matrix.image }} sh -c
-          "pip install --no-index --find-links dist firecrawl-anydoc &&
+          "pip install --no-index --find-links dist zeroset-anydoc &&
           python -m unittest discover -s python/tests"
       # setup-python's macOS builds are universal2 and launch as arm64 on Apple
       # Silicon, where pip refuses x86_64 wheels; arch -x86_64 forces the x64
@@ -413,7 +413,7 @@ jobs:
       - name: Install wheel and run tests (x86_64 via Rosetta)
         if: ${{ matrix.macos_x64 }}
         run: |
-          arch -x86_64 python -m pip install --no-index --find-links dist firecrawl-anydoc
+          arch -x86_64 python -m pip install --no-index --find-links dist zeroset-anydoc
           arch -x86_64 python -m unittest discover -s python/tests
 
   publish-pypi:

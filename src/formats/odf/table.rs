@@ -10,7 +10,9 @@
 
 use crate::error::ConvertError;
 use crate::formats::odf::text::{Ctx, parse_container};
-use crate::model::{Block, Cell, GridBuilder, Inline, TableKind};
+use crate::model::{
+    Block, Cell, GridBuilder, Inline, SourceUnit, SourceUnitKind, SourceUnitStatus, TableKind,
+};
 use crate::package::limits;
 use crate::package::xml::{Element, ns};
 use crate::shared::header::resolve_header_rows;
@@ -459,20 +461,35 @@ fn row_is_empty(row: &Element) -> bool {
 }
 
 /// One sheet of a spreadsheet body.
-pub fn parse_spreadsheet(sheet: &Element, ctx: &Ctx) -> Result<Vec<Block>, ConvertError> {
+pub fn parse_spreadsheet(
+    sheet: &Element,
+    ctx: &Ctx,
+) -> Result<(Vec<Block>, Vec<SourceUnit>), ConvertError> {
     let tables: Vec<&Element> = sheet.child_elems().filter(|e| e.is(ns::TABLE, "table")).collect();
     let multi_sheet = tables.len() > 1;
     let mut blocks = Vec::new();
-    for table in tables {
+    let mut units = Vec::new();
+    for (index, table) in tables.into_iter().enumerate() {
+        let start_block = blocks.len();
         let name = table.attr(ns::TABLE, "name").unwrap_or("");
         let content = parse_table(table, ctx)?;
-        if content.is_empty() {
-            continue;
-        }
-        if multi_sheet {
+        if multi_sheet && !content.is_empty() {
             blocks.push(Block::heading(2, vec![Inline::plain(name)]));
         }
         blocks.extend(content);
+        units.push(SourceUnit {
+            kind: SourceUnitKind::Sheet,
+            ordinal: index + 1,
+            name: (!name.is_empty()).then(|| name.to_string()),
+            status: if blocks.len() == start_block {
+                SourceUnitStatus::Empty
+            } else {
+                SourceUnitStatus::Parsed
+            },
+            reason: None,
+            start_block,
+            end_block: blocks.len(),
+        });
     }
-    Ok(blocks)
+    Ok((blocks, units))
 }

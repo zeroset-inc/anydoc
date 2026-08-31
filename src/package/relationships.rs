@@ -38,6 +38,15 @@ pub struct Relationship {
 #[derive(Debug, Default)]
 pub struct Relationships(HashMap<String, Relationship>);
 
+/// Outcome of reading an optional relationships part. Most frontends treat
+/// absence and corruption alike, while provenance surfaces need to distinguish
+/// "no relationships" from "relationships were lost".
+pub(crate) enum RelationshipPart {
+    Absent,
+    Unreadable,
+    Parsed(Relationships),
+}
+
 impl Relationships {
     pub fn get(&self, id: &str) -> Option<&Relationship> {
         self.0.get(id)
@@ -68,8 +77,21 @@ impl Relationships {
 /// the rest degrade per the unified policy with a log). Resource-limit
 /// errors always propagate.
 pub fn read_rels(pkg: &mut Package, part: &str) -> Result<Relationships, ConvertError> {
+    match read_relationship_part(pkg, part)? {
+        RelationshipPart::Parsed(rels) => Ok(rels),
+        RelationshipPart::Absent | RelationshipPart::Unreadable => Ok(Relationships::default()),
+    }
+}
+
+/// Read an optional relationships part without erasing whether a present part
+/// was unreadable. Resource-limit errors still propagate.
+pub(crate) fn read_relationship_part(
+    pkg: &mut Package,
+    part: &str,
+) -> Result<RelationshipPart, ConvertError> {
+    let present = pkg.has_part(part);
     let Some(root) = pkg.optional_xml_part(part)? else {
-        return Ok(Relationships::default());
+        return Ok(if present { RelationshipPart::Unreadable } else { RelationshipPart::Absent });
     };
     let mut map = HashMap::new();
     for rel in root.descendants(ns::PKG_RELS, "Relationship") {
@@ -84,11 +106,32 @@ pub fn read_rels(pkg: &mut Package, part: &str) -> Result<Relationships, Convert
         let rel_type = normalize_ooxml_uri(rel_type).unwrap_or_else(|| rel_type.to_string());
         map.insert(id.to_string(), Relationship { target: target.to_string(), rel_type, mode });
     }
-    Ok(Relationships(map))
+    Ok(RelationshipPart::Parsed(Relationships(map)))
 }
 
 /// A loaded internal relationship target: its resolved part path and bytes.
 pub type RelTarget = (String, Rc<[u8]>);
+
+/// Resolve an internal relationship target without reading its payload.
+pub fn rel_target_path(
+    rels: &Relationships,
+    base_part: &str,
+    rel_id: &str,
+) -> Result<Option<String>, ConvertError> {
+    let Some(rel) = rels.get(rel_id) else {
+        return Ok(None);
+    };
+    if rel.mode != TargetMode::Internal {
+        return Ok(None);
+    }
+    match crate::package::path::resolve(base_part, &rel.target) {
+        Ok(target) => Ok(Some(target.path)),
+        Err(e) => {
+            log::warn!("skipping unresolvable relationship target {:?}: {e}", rel.target);
+            Ok(None)
+        }
+    }
+}
 
 /// Load an internal relationship target's bytes, resolved against the part
 /// the relationship appears in. Unknown ids, external targets, and
@@ -100,23 +143,13 @@ pub fn rel_target_bytes(
     base_part: &str,
     rel_id: &str,
 ) -> Result<Option<RelTarget>, ConvertError> {
-    let Some(rel) = rels.get(rel_id) else {
+    let Some(target) = rel_target_path(rels, base_part, rel_id)? else {
         return Ok(None);
     };
-    if rel.mode != TargetMode::Internal {
-        return Ok(None);
-    }
-    let target = match crate::package::path::resolve(base_part, &rel.target) {
-        Ok(t) => t,
-        Err(e) => {
-            log::warn!("skipping unresolvable relationship target {:?}: {e}", rel.target);
-            return Ok(None);
-        }
-    };
-    match pkg.borrow_mut().optional_part(&target.path)? {
-        Some(bytes) => Ok(Some((target.path, bytes))),
+    match pkg.borrow_mut().optional_part(&target)? {
+        Some(bytes) => Ok(Some((target, bytes))),
         None => {
-            log::warn!("relationship target {} is missing", target.path);
+            log::warn!("relationship target {target} is missing");
             Ok(None)
         }
     }

@@ -6,7 +6,9 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 
+mod assets;
 mod document;
+mod spreadsheet;
 
 create_exception!(
     anydoc,
@@ -163,18 +165,32 @@ fn format_from_path(path: PathBuf) -> Option<&'static str> {
 /// content; the extension is the fallback for signature-less formats (CSV)
 /// and unrecognizable containers.
 #[pyfunction]
-fn to_markdown(py: Python<'_>, path: PathBuf) -> PyResult<String> {
-    py.detach(|| anydoc::to_markdown(&path)).map_err(|e| convert_error(py, e))
+#[pyo3(signature = (path, *, asset_policy=None))]
+fn to_markdown(
+    py: Python<'_>,
+    path: PathBuf,
+    asset_policy: Option<PyRef<'_, assets::AssetRetentionPolicy>>,
+) -> PyResult<String> {
+    let asset_policy = assets::core(asset_policy);
+    py.detach(|| anydoc::to_markdown_with_asset_policy(&path, asset_policy))
+        .map_err(|e| convert_error(py, e))
 }
 
 /// Convert an in-memory document to Markdown. Without a format, it is
 /// detected from the content, which signature-less formats (CSV) have to name
 /// explicitly.
 #[pyfunction]
-#[pyo3(signature = (data, format=None))]
-fn to_markdown_bytes(py: Python<'_>, data: Vec<u8>, format: Option<&str>) -> PyResult<String> {
+#[pyo3(signature = (data, format=None, *, asset_policy=None))]
+fn to_markdown_bytes(
+    py: Python<'_>,
+    data: Vec<u8>,
+    format: Option<&str>,
+    asset_policy: Option<PyRef<'_, assets::AssetRetentionPolicy>>,
+) -> PyResult<String> {
     let format = format.map(parse_format).transpose()?;
-    py.detach(|| anydoc::to_markdown_bytes(&data, format)).map_err(|e| convert_error(py, e))
+    let asset_policy = assets::core(asset_policy);
+    py.detach(|| anydoc::to_markdown_bytes_with_asset_policy(&data, format, asset_policy))
+        .map_err(|e| convert_error(py, e))
 }
 
 /// Parse an in-memory document into the document model, which also carries
@@ -183,16 +199,59 @@ fn to_markdown_bytes(py: Python<'_>, data: Vec<u8>, format: Option<&str>) -> PyR
 /// Unsupported for `pdf`: PDF conversion produces Markdown directly and has
 /// no document-model form; use `to_markdown_bytes`.
 #[pyfunction]
-#[pyo3(signature = (data, format=None))]
+#[pyo3(signature = (data, format=None, *, asset_policy=None))]
 fn to_document(
     py: Python<'_>,
     data: Vec<u8>,
     format: Option<&str>,
+    asset_policy: Option<PyRef<'_, assets::AssetRetentionPolicy>>,
 ) -> PyResult<document::Document> {
     let format = format.map(parse_format).transpose()?;
-    let parsed =
-        py.detach(|| anydoc::to_document(&data, format)).map_err(|e| convert_error(py, e))?;
-    document::document(py, parsed)
+    let asset_policy = assets::core(asset_policy);
+    let (parsed, rendered) = py
+        .detach(|| {
+            let parsed = anydoc::to_document_with_asset_policy(&data, format, asset_policy)?;
+            let rendered = anydoc::render_document(&parsed);
+            Ok::<_, anydoc::ConvertError>((parsed, rendered))
+        })
+        .map_err(|e| convert_error(py, e))?;
+    document::document(py, parsed, rendered)
+}
+
+#[pyfunction]
+#[pyo3(signature = (data, format=None))]
+fn to_rendered_parts(
+    py: Python<'_>,
+    data: Vec<u8>,
+    format: Option<&str>,
+) -> PyResult<document::RenderedParts> {
+    let format = format.map(parse_format).transpose()?;
+    let (parts, source_units) = py
+        .detach(|| {
+            let mut parsed = anydoc::to_document_with_asset_policy(
+                &data,
+                format,
+                anydoc::AssetRetentionPolicy { max_unique_assets: Some(0), ..Default::default() },
+            )?;
+            let parts = anydoc::render_document_parts(&parsed);
+            Ok::<_, anydoc::ConvertError>((parts, std::mem::take(&mut parsed.source_units)))
+        })
+        .map_err(|e| convert_error(py, e))?;
+    document::rendered_parts(py, parts, source_units)
+}
+
+#[pyfunction]
+#[pyo3(signature = (data, *, asset_policy=None))]
+fn extract_spreadsheet_assets(
+    py: Python<'_>,
+    data: Vec<u8>,
+    asset_policy: Option<PyRef<'_, assets::AssetRetentionPolicy>>,
+) -> PyResult<spreadsheet::SpreadsheetAssetManifest> {
+    let asset_policy = assets::core(asset_policy);
+    let manifest = py
+        .detach(|| anydoc::extract_spreadsheet_assets_with_policy(&data, asset_policy))
+        .map_err(|e| convert_error(py, e))?;
+    spreadsheet::manifest(py, manifest)
 }
 
 /// Convert documents to GitHub-Flavored Markdown.
@@ -204,6 +263,9 @@ fn _anydoc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(to_markdown, m)?)?;
     m.add_function(wrap_pyfunction!(to_markdown_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(to_document, m)?)?;
+    m.add_function(wrap_pyfunction!(to_rendered_parts, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_spreadsheet_assets, m)?)?;
+    m.add_class::<assets::AssetRetentionPolicy>()?;
     m.add_class::<document::Asset>()?;
     m.add_class::<document::Block>()?;
     m.add_class::<document::Cell>()?;
@@ -215,8 +277,13 @@ fn _anydoc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<document::List>()?;
     m.add_class::<document::ListItem>()?;
     m.add_class::<document::Note>()?;
+    m.add_class::<document::RenderedPart>()?;
+    m.add_class::<document::RenderedParts>()?;
+    m.add_class::<document::SourceUnit>()?;
     m.add_class::<document::Style>()?;
     m.add_class::<document::Table>()?;
+    m.add_class::<spreadsheet::SpreadsheetAssetManifest>()?;
+    m.add_class::<spreadsheet::SpreadsheetAssetSourceUnit>()?;
     m.add("ConvertError", m.py().get_type::<ConvertError>())?;
     m.add("EncryptedError", m.py().get_type::<EncryptedError>())?;
     m.add("MalformedError", m.py().get_type::<MalformedError>())?;

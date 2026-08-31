@@ -2,34 +2,38 @@
 //!
 //! Only fully resolved content lives here: format frontends resolve style
 //! cascades, numbering, and references before constructing these types.
-//! A [`Document`] is self-contained - embedded assets carry their bytes, so it
-//! stays usable after the source archive is gone.
+//! A [`Document`] is self-contained by default. Callers can choose bounded
+//! asset retention while preserving asset identity and source provenance.
 
 mod asset;
 mod block;
 mod inline;
 mod link;
 mod list;
+mod source;
 mod style;
 mod table;
 
-pub use asset::{Asset, AssetId};
+pub use asset::{Asset, AssetId, AssetOmissionReason};
 pub use block::Block;
 pub use inline::{Inline, checkbox_text, inlines_are_empty, inlines_to_plain_text};
 pub use link::{AnchorId, ImageSource, LinkTarget};
 pub use list::{List, ListItem, MarkerKind};
+pub use source::{SourceUnit, SourceUnitKind, SourceUnitStatus};
 pub use style::Style;
 pub use table::{Cell, CellSlot, Table, TableKind};
 
 /// Frontends build grids; consumers read them off [`Table::grid`].
 pub(crate) use table::GridBuilder;
 
-/// A parsed document: its body, its notes, and the bytes of everything it
-/// embedded.
+/// A parsed document: its body, notes, and embedded asset records.
 #[derive(Debug, Clone, Default)]
 pub struct Document {
     /// Body content in reading order.
     pub blocks: Vec<Block>,
+    /// Source-defined units mapped to half-open ranges in [`Self::blocks`].
+    /// Empty units have equal start and end offsets.
+    pub source_units: Vec<SourceUnit>,
     /// Note bodies, in the order the document defines them. Text refers to
     /// them by id through [`Inline::NoteRef`].
     pub notes: Vec<Note>,

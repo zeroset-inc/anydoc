@@ -12,13 +12,77 @@ use anydoc::model;
 
 #[pyclass(frozen, get_all, module = "anydoc")]
 pub struct Document {
+    /// Complete Markdown, including source-unit markers and note definitions.
+    markdown: String,
+    /// Ordered source-unit and unowned block ranges. list[RenderedPart]
+    rendered_parts: Py<PyList>,
     /// list[Block]
     blocks: Py<PyList>,
+    /// Source-defined units mapped to ranges in `blocks`. list[SourceUnit]
+    source_units: Py<PyList>,
     /// Footnote and endnote bodies, referenced from text by a `note_ref`
     /// inline. list[Note]
     notes: Py<PyList>,
     /// list[Asset]
     assets: Py<PyList>,
+}
+
+#[pyclass(frozen, get_all, module = "anydoc")]
+pub struct RenderedParts {
+    /// list[RenderedPart]
+    parts: Py<PyList>,
+    /// list[SourceUnit]
+    source_units: Py<PyList>,
+}
+
+#[pyclass(frozen, get_all, module = "anydoc")]
+pub struct RenderedPart {
+    markdown: String,
+    source_unit_index: Option<usize>,
+    start_block: usize,
+    end_block: usize,
+    /// Distinct embedded asset ids referenced by this range.
+    asset_ids: Py<PyList>,
+}
+
+fn rendered_part(py: Python<'_>, part: anydoc::RenderedPart) -> PyResult<RenderedPart> {
+    Ok(RenderedPart {
+        markdown: part.markdown,
+        source_unit_index: part.source_unit_index,
+        start_block: part.start_block,
+        end_block: part.end_block,
+        asset_ids: PyList::new(py, part.asset_ids.into_iter().map(|id| id.0))?.unbind(),
+    })
+}
+
+#[pyclass(frozen, get_all, module = "anydoc")]
+pub struct SourceUnit {
+    kind: &'static str,
+    ordinal: usize,
+    name: Option<String>,
+    status: &'static str,
+    reason: Option<String>,
+    start_block: usize,
+    end_block: usize,
+}
+
+fn source_unit(unit: model::SourceUnit) -> SourceUnit {
+    SourceUnit {
+        kind: match unit.kind {
+            model::SourceUnitKind::Slide => "slide",
+            model::SourceUnitKind::Sheet => "sheet",
+        },
+        ordinal: unit.ordinal,
+        name: unit.name,
+        status: match unit.status {
+            model::SourceUnitStatus::Parsed => "parsed",
+            model::SourceUnitStatus::Empty => "empty",
+            model::SourceUnitStatus::Skipped => "skipped",
+        },
+        reason: unit.reason,
+        start_block: unit.start_block,
+        end_block: unit.end_block,
+    }
 }
 
 #[pyclass(frozen, get_all, module = "anydoc")]
@@ -348,8 +412,8 @@ fn note(py: Python<'_>, note: model::Note) -> PyResult<Note> {
     })
 }
 
-/// An embedded binary asset (image, object payload). Bytes are always
-/// retained, so a document stays self-contained.
+/// An embedded binary asset (image, object payload), including provenance for
+/// payloads omitted by caller retention policy.
 #[pyclass(frozen, get_all, module = "anydoc")]
 pub struct Asset {
     /// Index into `Document.assets`, as referenced by an image source.
@@ -358,21 +422,55 @@ pub struct Asset {
     media_type: String,
     /// Package part or stream the asset came from, for provenance.
     origin_part: String,
-    data: Py<PyBytes>,
+    byte_len: usize,
+    data: Option<Py<PyBytes>>,
+    /// max_unique_assets, max_total_bytes, max_asset_bytes, or None.
+    omission_reason: Option<&'static str>,
 }
 
-fn asset(py: Python<'_>, asset: model::Asset) -> PyResult<Asset> {
+fn omission_reason(reason: model::AssetOmissionReason) -> &'static str {
+    match reason {
+        model::AssetOmissionReason::MaxUniqueAssets => "max_unique_assets",
+        model::AssetOmissionReason::MaxTotalBytes => "max_total_bytes",
+        model::AssetOmissionReason::MaxAssetBytes => "max_asset_bytes",
+    }
+}
+
+pub(crate) fn asset(py: Python<'_>, asset: model::Asset) -> PyResult<Asset> {
     Ok(Asset {
         id: asset.id.0,
         media_type: asset.media_type,
         origin_part: asset.origin_part,
-        data: PyBytes::new(py, &asset.bytes).unbind(),
+        byte_len: asset.byte_len,
+        data: asset.omission_reason.is_none().then(|| PyBytes::new(py, &asset.bytes).unbind()),
+        omission_reason: asset.omission_reason.map(omission_reason),
     })
 }
 
-pub fn document(py: Python<'_>, document: model::Document) -> PyResult<Document> {
+pub fn rendered_parts(
+    py: Python<'_>,
+    parts: Vec<anydoc::RenderedPart>,
+    source_units: Vec<model::SourceUnit>,
+) -> PyResult<RenderedParts> {
+    Ok(RenderedParts {
+        parts: pylist(py, parts.into_iter().map(|part| rendered_part(py, part)))?,
+        source_units: pylist(py, source_units.into_iter().map(|unit| Ok(source_unit(unit))))?,
+    })
+}
+
+pub fn document(
+    py: Python<'_>,
+    document: model::Document,
+    rendered: anydoc::RenderedDocument,
+) -> PyResult<Document> {
     Ok(Document {
+        markdown: rendered.markdown,
+        rendered_parts: pylist(py, rendered.parts.into_iter().map(|part| rendered_part(py, part)))?,
         blocks: blocks(py, document.blocks)?,
+        source_units: pylist(
+            py,
+            document.source_units.into_iter().map(|unit| Ok(source_unit(unit))),
+        )?,
         notes: pylist(py, document.notes.into_iter().map(|n| note(py, n)))?,
         assets: pylist(py, document.assets.into_iter().map(|a| asset(py, a)))?,
     })
@@ -386,7 +484,7 @@ fn inlines(py: Python<'_>, items: Vec<model::Inline>) -> PyResult<Py<PyList>> {
     pylist(py, items.into_iter().map(|i| inline(py, i)))
 }
 
-fn pylist<'py, T: IntoPyObject<'py>>(
+pub(crate) fn pylist<'py, T: IntoPyObject<'py>>(
     py: Python<'py>,
     items: impl Iterator<Item = PyResult<T>>,
 ) -> PyResult<Py<PyList>> {

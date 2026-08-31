@@ -61,17 +61,29 @@ def format_from_extension(extension: str) -> Format | None:
 def format_from_path(path: str | os.PathLike[str]) -> Format | None:
     """The format a path's extension names."""
 
-def to_markdown(path: str | os.PathLike[str]) -> str:
+def to_markdown(
+    path: str | os.PathLike[str], *, asset_policy: AssetRetentionPolicy | None = None
+) -> str:
     """Convert a document file to Markdown. The format is detected from the
     file content; the extension is the fallback for signature-less formats
     (CSV) and unrecognizable containers."""
 
-def to_markdown_bytes(data: bytes | bytearray, format: Format | None = None) -> str:
+def to_markdown_bytes(
+    data: bytes | bytearray,
+    format: Format | None = None,
+    *,
+    asset_policy: AssetRetentionPolicy | None = None,
+) -> str:
     """Convert an in-memory document to Markdown. Without a format, it is
     detected from the content, which signature-less formats (CSV) have to
     name explicitly."""
 
-def to_document(data: bytes | bytearray, format: Format | None = None) -> Document:
+def to_document(
+    data: bytes | bytearray,
+    format: Format | None = None,
+    *,
+    asset_policy: AssetRetentionPolicy | None = None,
+) -> Document:
     """Parse an in-memory document into the document model, which also
     carries the embedded assets. Without a format, it is detected from the
     content.
@@ -79,13 +91,47 @@ def to_document(data: bytes | bytearray, format: Format | None = None) -> Docume
     Unsupported for `pdf`: PDF conversion produces Markdown directly and has
     no document-model form; use `to_markdown_bytes`."""
 
+def to_rendered_parts(data: bytes | bytearray, format: Format | None = None) -> RenderedParts:
+    """Parse and render ordered Markdown/provenance parts."""
+
+def extract_spreadsheet_assets(
+    data: bytes | bytearray, *, asset_policy: AssetRetentionPolicy | None = None
+) -> SpreadsheetAssetManifest:
+    """Extract ordered sheet and DrawingML asset provenance."""
+
 @final
 class Document:
+    markdown: str
+    rendered_parts: list[RenderedPart]
     blocks: list[Block]
+    source_units: list[SourceUnit]
     notes: list[Note]
     """Footnote and endnote bodies, referenced from text by a `note_ref`
     inline."""
     assets: list[Asset]
+
+@final
+class RenderedParts:
+    parts: list[RenderedPart]
+    source_units: list[SourceUnit]
+
+@final
+class RenderedPart:
+    markdown: str
+    source_unit_index: int | None
+    start_block: int
+    end_block: int
+    asset_ids: list[int]
+
+@final
+class SourceUnit:
+    kind: Literal["slide", "sheet"]
+    ordinal: int
+    name: str | None
+    status: Literal["parsed", "empty", "skipped"]
+    reason: str | None
+    start_block: int
+    end_block: int
 
 @final
 class Block:
@@ -210,8 +256,7 @@ class Note:
 
 @final
 class Asset:
-    """An embedded binary asset (image, object payload). Bytes are always
-    retained, so a document stays self-contained."""
+    """An embedded asset, possibly omitted by caller retention policy."""
 
     id: int
     """Index into `Document.assets`, as referenced by an image source."""
@@ -219,4 +264,34 @@ class Asset:
     """MIME type, e.g. `image/png`."""
     origin_part: str
     """Package part or stream the asset came from, for provenance."""
-    data: bytes
+    byte_len: int
+    data: bytes | None
+    omission_reason: Literal["max_unique_assets", "max_total_bytes", "max_asset_bytes"] | None
+
+@final
+class AssetRetentionPolicy:
+    def __init__(
+        self,
+        *,
+        max_unique_assets: int | None = None,
+        max_total_bytes: int | None = None,
+        max_asset_bytes: int | None = None,
+    ) -> None: ...
+    max_unique_assets: int | None
+    max_total_bytes: int | None
+    max_asset_bytes: int | None
+
+@final
+class SpreadsheetAssetManifest:
+    availability: Literal["available", "unsupported"]
+    reason: str | None
+    source_units: list[SpreadsheetAssetSourceUnit]
+    assets: list[Asset]
+
+@final
+class SpreadsheetAssetSourceUnit:
+    ordinal: int
+    name: str | None
+    status: Literal["complete", "degraded"]
+    reason: str | None
+    asset_ids: list[int]

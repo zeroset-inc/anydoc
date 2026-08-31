@@ -20,6 +20,8 @@ CSV = FIXTURES / "csv" / "sheet.csv"
 ENCRYPTED = FIXTURES / "malformed" / "encrypted--errors.odt"
 ZIPBOMB = FIXTURES / "abuse" / "zipbomb--errors.docx"
 MIXED = FIXTURES / "pdf" / "handmade-mixed.pdf"
+PRESENTATION = FIXTURES / "pptx" / "pres.pptx"
+XLS = FIXTURES / "xls" / "sheet.xls"
 
 HOSTED_MARKDOWN = "# Read by the hosted parser\n"
 
@@ -92,6 +94,31 @@ class AnydocTest(unittest.TestCase):
         self.assertIsInstance(image.data, bytes)
         self.assertGreater(len(image.data), 0)
         self.assertEqual(image.id, document.assets.index(image))
+
+    def test_reconciled_provenance_rendering_and_asset_policy_surfaces(self):
+        document = anydoc.to_document(PRESENTATION.read_bytes(), "pptx")
+        self.assertEqual(document.markdown, anydoc.to_markdown_bytes(PRESENTATION.read_bytes()))
+        self.assertTrue(document.source_units)
+        self.assertEqual(document.source_units[0].kind, "slide")
+        self.assertEqual(document.source_units[0].ordinal, 1)
+        self.assertEqual(document.rendered_parts[0].source_unit_index, 0)
+
+        compact = anydoc.to_rendered_parts(PRESENTATION.read_bytes(), "pptx")
+        self.assertEqual(len(compact.source_units), len(document.source_units))
+        self.assertEqual(len(compact.parts), len(document.rendered_parts))
+
+        limited = anydoc.to_document(
+            RICH.read_bytes(),
+            "docx",
+            asset_policy=anydoc.AssetRetentionPolicy(max_unique_assets=0),
+        )
+        self.assertTrue(limited.assets)
+        self.assertTrue(all(asset.data is None for asset in limited.assets))
+        self.assertTrue(all(asset.omission_reason == "max_unique_assets" for asset in limited.assets))
+
+        manifest = anydoc.extract_spreadsheet_assets(XLS.read_bytes())
+        self.assertEqual(manifest.availability, "unsupported")
+        self.assertEqual(manifest.reason, "binary_spreadsheet_assets_unsupported")
 
     def test_format_detection_reads_content_extension_and_path(self):
         self.assertEqual(anydoc.format_from_bytes(RICH.read_bytes()), "docx")

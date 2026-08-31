@@ -100,6 +100,8 @@ export declare const enum CellSlotKind {
 
 export interface Document {
   blocks: Array<Block>
+  /** Source-defined units mapped to half-open ranges in `blocks`. */
+  sourceUnits: Array<SourceUnit>
   /**
    * Footnote and endnote bodies, referenced from text by a `noteRef`
    * inline.
@@ -255,6 +257,27 @@ export interface Note {
 export declare const enum NoteKind {
   footnote = 'footnote',
   endnote = 'endnote'
+}
+
+export interface SourceUnit {
+  kind: SourceUnitKind
+  ordinal: number
+  name?: string
+  status: SourceUnitStatus
+  reason?: string
+  startBlock: number
+  endBlock: number
+}
+
+export declare const enum SourceUnitKind {
+  slide = 'slide',
+  sheet = 'sheet'
+}
+
+export declare const enum SourceUnitStatus {
+  parsed = 'parsed',
+  empty = 'empty',
+  skipped = 'skipped'
 }
 
 /** Fully resolved character style. */

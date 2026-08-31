@@ -4,6 +4,7 @@
 //! assembly, so one workbook saved in any of them converts identically.
 
 mod controls;
+mod images;
 mod numfmt;
 mod xls;
 mod xlsb;
@@ -15,7 +16,15 @@ use crate::package::archive::probe_ole;
 use crate::package::relationships::{read_rels, rel_type};
 use crate::package::{Package, path};
 
+#[cfg(test)]
 pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+    parse_with_asset_policy(bytes, crate::AssetRetentionPolicy::default())
+}
+
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     const OLE_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
     if bytes.starts_with(&OLE_MAGIC) {
         // An encrypted OOXML package is an OLE container carrying no BIFF
@@ -37,10 +46,56 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         return Err(not_a_workbook());
     };
     match classify(&mut pkg, &wb_part)? {
-        Some(Container::Xml) => xlsx::parse(&mut pkg, &wb_part),
+        Some(Container::Xml) => {
+            let extracted = images::xlsx_images(bytes, asset_policy)?;
+            xlsx::parse(&mut pkg, &wb_part, extracted)
+        }
         Some(Container::Bin) => xlsb::parse(&mut pkg, &wb_part),
         None => Err(not_a_workbook()),
     }
+}
+
+pub(crate) fn extract_assets_with_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<crate::spreadsheet::SpreadsheetAssetManifest, ConvertError> {
+    use crate::spreadsheet::{
+        SpreadsheetAssetAvailability, SpreadsheetAssetSourceUnit, SpreadsheetAssetUnitStatus,
+    };
+
+    let extracted = images::xlsx_images(bytes, asset_policy)?;
+    let availability = match extracted.availability {
+        images::XlsxImageAvailability::Available => SpreadsheetAssetAvailability::Available,
+        images::XlsxImageAvailability::UnsupportedBinary => {
+            SpreadsheetAssetAvailability::Unsupported
+        }
+        images::XlsxImageAvailability::Unavailable => {
+            return Err(ConvertError::malformed("spreadsheet workbook metadata is unreadable"));
+        }
+    };
+    let source_units = extracted
+        .units
+        .into_iter()
+        .enumerate()
+        .map(|(index, unit)| SpreadsheetAssetSourceUnit {
+            ordinal: index + 1,
+            name: unit.name,
+            status: if unit.degraded {
+                SpreadsheetAssetUnitStatus::Degraded
+            } else {
+                SpreadsheetAssetUnitStatus::Complete
+            },
+            reason: unit.degraded.then(|| "worksheet_drawing_unreadable".to_string()),
+            asset_ids: unit.asset_ids,
+        })
+        .collect();
+    Ok(crate::spreadsheet::SpreadsheetAssetManifest {
+        availability,
+        reason: (availability == SpreadsheetAssetAvailability::Unsupported)
+            .then(|| "binary_spreadsheet_assets_unsupported".to_string()),
+        source_units,
+        assets: extracted.assets.assets,
+    })
 }
 
 fn not_a_workbook() -> ConvertError {

@@ -5,14 +5,24 @@ mod table;
 mod text;
 
 use crate::error::ConvertError;
-use crate::model::{Block, Document, Inline, inlines_are_empty};
+use crate::model::{
+    Block, Document, Inline, SourceUnit, SourceUnitKind, SourceUnitStatus, inlines_are_empty,
+};
 use crate::package::Package;
 use crate::package::xml::{Element, ns};
 use crate::shared::assets::AssetSink;
 use std::cell::RefCell;
 use text::{Ctx, parse_container};
 
+#[cfg(test)]
 pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+    parse_with_asset_policy(bytes, crate::AssetRetentionPolicy::default())
+}
+
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     let pkg = RefCell::new(Package::open(bytes)?);
 
     if is_encrypted(&pkg)? {
@@ -35,11 +45,11 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         .and_then(|d| d.find(ns::OFFICE, "body"))
         .ok_or_else(|| ConvertError::malformed_part("content.xml", "no office:body"))?;
 
-    let assets = RefCell::new(AssetSink::new());
+    let assets = RefCell::new(AssetSink::with_policy(asset_policy));
     let ctx = Ctx::new(&styles, &pkg, &assets);
 
-    let blocks = if let Some(text) = body.find(ns::OFFICE, "text") {
-        parse_container(text, &ctx)?
+    let (blocks, source_units) = if let Some(text) = body.find(ns::OFFICE, "text") {
+        (parse_container(text, &ctx)?, Vec::new())
     } else if let Some(sheet) = body.find(ns::OFFICE, "spreadsheet") {
         table::parse_spreadsheet(sheet, &ctx)?
     } else if let Some(pres) = body.find(ns::OFFICE, "presentation") {
@@ -53,7 +63,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
 
     let notes = ctx.notes.into_inner();
     let assets = std::mem::take(&mut assets.borrow_mut().assets);
-    Ok(Document { blocks, notes, assets })
+    Ok(Document { blocks, source_units, notes, assets })
 }
 
 /// Encrypted ODF packages carry `manifest:encryption-data` elements on file
@@ -68,9 +78,14 @@ fn is_encrypted(pkg: &RefCell<Package>) -> Result<bool, ConvertError> {
     Ok(tree.first_descendant(ns::MANIFEST, "encryption-data").is_some())
 }
 
-fn parse_presentation(pres: &Element, ctx: &Ctx) -> Result<Vec<Block>, ConvertError> {
+fn parse_presentation(
+    pres: &Element,
+    ctx: &Ctx,
+) -> Result<(Vec<Block>, Vec<SourceUnit>), ConvertError> {
     let mut blocks = Vec::new();
-    for page in pres.find_all(ns::DRAW, "page") {
+    let mut units = Vec::new();
+    for (index, page) in pres.find_all(ns::DRAW, "page").enumerate() {
+        let start_block = blocks.len();
         let mut title = Vec::new();
         let mut body = Vec::new();
         let mut notes = Vec::new();
@@ -81,8 +96,21 @@ fn parse_presentation(pres: &Element, ctx: &Ctx) -> Result<Vec<Block>, ConvertEr
         if !notes.is_empty() {
             blocks.push(Block::BlockQuote(notes));
         }
+        units.push(SourceUnit {
+            kind: SourceUnitKind::Slide,
+            ordinal: index + 1,
+            name: page.attr(ns::DRAW, "name").map(str::to_string),
+            status: if blocks.len() == start_block {
+                SourceUnitStatus::Empty
+            } else {
+                SourceUnitStatus::Parsed
+            },
+            reason: None,
+            start_block,
+            end_block: blocks.len(),
+        });
     }
-    Ok(blocks)
+    Ok((blocks, units))
 }
 
 /// Walk a page's shapes in document order, recursing into `draw:g` groups.
@@ -320,6 +348,7 @@ mod tests {
             </office:document-content>"#;
         let doc = parse(&odt_with_content(content)).unwrap();
         let md = crate::render::markdown::document_to_markdown(&doc);
-        assert_eq!(md, "|  |  |  |\n| --- | --- | --- |\n| 14 | L/R [x] Roof | [ ] Wall |\n");
+        assert!(md.contains("kind=sheet ordinal=1 status=parsed name=S"), "{md}");
+        assert!(md.contains("| 14 | L/R [x] Roof | [ ] Wall |"), "{md}");
     }
 }

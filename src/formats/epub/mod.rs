@@ -11,7 +11,15 @@ use crate::shared::uri::is_absolute_uri;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
 pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+    parse_with_asset_policy(bytes, crate::AssetRetentionPolicy::default())
+}
+
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     let pkg = RefCell::new(Package::open(bytes)?);
 
     let container = pkg.borrow_mut().required_xml_part("META-INF/container.xml")?;
@@ -68,7 +76,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         }
     }
 
-    let assets = RefCell::new(AssetSink::new());
+    let assets = RefCell::new(AssetSink::with_policy(asset_policy));
     let mut css_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut converted = 0usize;
     for chapter_path in &spine_paths {

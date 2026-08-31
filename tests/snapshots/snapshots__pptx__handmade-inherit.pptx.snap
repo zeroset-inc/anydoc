@@ -2,6 +2,8 @@
 source: tests/snapshots.rs
 expression: output
 ---
+<!-- anydoc:source-unit-start kind=slide ordinal=1 status=parsed -->
+
 ## Inherited Title Slide
 
 - iii. **Roman three bold via master**
@@ -11,3 +13,5 @@ expression: output
       - *Dash bullet italic via master level two*
 
 **Plain closing line**
+
+<!-- anydoc:source-unit-end kind=slide ordinal=1 status=parsed -->

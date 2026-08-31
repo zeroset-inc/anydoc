@@ -28,7 +28,10 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use stsh::Stylesheet;
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+pub fn parse_with_asset_policy(
+    bytes: &[u8],
+    asset_policy: crate::AssetRetentionPolicy,
+) -> Result<Document, ConvertError> {
     let cursor = Cursor::new(bytes);
     let mut ole = cfb::CompoundFile::open(cursor)
         .map_err(|e| ConvertError::malformed(format!("not an OLE2 compound file: {e}")))?;
@@ -112,7 +115,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         note_refs,
         counters: std::cell::RefCell::new(Counters::default()),
         data,
-        assets: std::cell::RefCell::new(AssetSink::new()),
+        assets: std::cell::RefCell::new(AssetSink::with_policy(asset_policy)),
     };
     let blocks = assembler.build_blocks(0, main_end)?;
     let mut notes = Vec::new();
@@ -125,7 +128,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         notes.push(Note { id, kind, blocks: assembler.build_blocks(lo, hi)? });
     }
     let assets = std::mem::take(&mut assembler.assets.borrow_mut().assets);
-    Ok(Document { blocks, notes, assets })
+    Ok(Document { blocks, source_units: Vec::new(), notes, assets })
 }
 
 /// Read a PLC's CP array; n is the number of data elements.

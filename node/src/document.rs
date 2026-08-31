@@ -8,10 +8,59 @@ use anydoc::model;
 #[napi(object)]
 pub struct Document {
     pub blocks: Vec<Block>,
+    /// Source-defined units mapped to half-open ranges in `blocks`.
+    pub source_units: Vec<SourceUnit>,
     /// Footnote and endnote bodies, referenced from text by a `noteRef`
     /// inline.
     pub notes: Vec<Note>,
     pub assets: Vec<Asset>,
+}
+
+#[napi(string_enum)]
+#[allow(non_camel_case_types)]
+pub enum SourceUnitKind {
+    slide,
+    sheet,
+}
+
+#[napi(string_enum)]
+#[allow(non_camel_case_types)]
+pub enum SourceUnitStatus {
+    parsed,
+    empty,
+    skipped,
+}
+
+#[napi(object)]
+pub struct SourceUnit {
+    pub kind: SourceUnitKind,
+    pub ordinal: u32,
+    pub name: Option<String>,
+    pub status: SourceUnitStatus,
+    pub reason: Option<String>,
+    pub start_block: u32,
+    pub end_block: u32,
+}
+
+impl From<model::SourceUnit> for SourceUnit {
+    fn from(unit: model::SourceUnit) -> Self {
+        SourceUnit {
+            kind: match unit.kind {
+                model::SourceUnitKind::Slide => SourceUnitKind::slide,
+                model::SourceUnitKind::Sheet => SourceUnitKind::sheet,
+            },
+            ordinal: unit.ordinal as u32,
+            name: unit.name,
+            status: match unit.status {
+                model::SourceUnitStatus::Parsed => SourceUnitStatus::parsed,
+                model::SourceUnitStatus::Empty => SourceUnitStatus::empty,
+                model::SourceUnitStatus::Skipped => SourceUnitStatus::skipped,
+            },
+            reason: unit.reason,
+            start_block: unit.start_block as u32,
+            end_block: unit.end_block as u32,
+        }
+    }
 }
 
 #[napi(string_enum)]
@@ -462,6 +511,7 @@ impl From<model::Document> for Document {
     fn from(document: model::Document) -> Self {
         Document {
             blocks: blocks(document.blocks),
+            source_units: document.source_units.into_iter().map(SourceUnit::from).collect(),
             notes: document.notes.into_iter().map(Note::from).collect(),
             assets: document.assets.into_iter().map(Asset::from).collect(),
         }

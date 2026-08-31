@@ -25,6 +25,7 @@ const RICH = fixture('docx/handmade-rich.docx')
 const CSV = fixture('csv/sheet.csv')
 const ENCRYPTED = fixture('malformed/encrypted--errors.odt')
 const MIXED = fixture('pdf/handmade-mixed.pdf')
+const PRESENTATION = fixture('pptx/pres.pptx')
 
 test('toMarkdown detects the format from the file content', async () => {
   const markdown = await toMarkdown(OUTLINE)
@@ -59,6 +60,14 @@ test('toDocument carries embedded assets as buffers', async () => {
   assert.ok(Buffer.isBuffer(image.data))
   assert.ok(image.data.length > 0)
   assert.equal(image.id, document.assets.indexOf(image))
+})
+
+test('toDocument exposes ordered source units', async () => {
+  const document = await toDocument(await readFile(PRESENTATION), 'pptx')
+  assert.ok(document.sourceUnits.length > 0)
+  assert.equal(document.sourceUnits[0].kind, 'slide')
+  assert.equal(document.sourceUnits[0].ordinal, 1)
+  assert.equal(document.sourceUnits.at(-1).ordinal, document.sourceUnits.length)
 })
 
 test('format detection reads content, extension, and path', async () => {
