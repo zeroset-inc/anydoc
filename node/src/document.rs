@@ -483,8 +483,7 @@ impl From<model::Note> for Note {
     }
 }
 
-/// An embedded binary asset (image, object payload). Bytes are always
-/// retained, so a document stays self-contained.
+/// An embedded binary asset with bounded retention and raster metadata.
 #[napi(object)]
 pub struct Asset {
     /// Index into `Document.assets`, as referenced by an image source.
@@ -493,16 +492,46 @@ pub struct Asset {
     pub media_type: String,
     /// Package part or stream the asset came from, for provenance.
     pub origin_part: String,
-    pub data: Buffer,
+    pub byte_len: u32,
+    pub image_width: Option<u32>,
+    pub image_height: Option<u32>,
+    pub decode_width: Option<u32>,
+    pub decode_height: Option<u32>,
+    pub decoded_pixels: Option<i64>,
+    pub data: Option<Buffer>,
+    pub omission_reason: Option<String>,
 }
 
 impl From<model::Asset> for Asset {
     fn from(asset: model::Asset) -> Self {
+        let omission_reason = asset.omission_reason.map(|reason| {
+            match reason {
+                model::AssetOmissionReason::MaxAssetOccurrences => "max_asset_occurrences",
+                model::AssetOmissionReason::MaxUniqueAssets => "max_unique_assets",
+                model::AssetOmissionReason::MaxTotalBytes => "max_total_bytes",
+                model::AssetOmissionReason::MaxAssetBytes => "max_asset_bytes",
+                model::AssetOmissionReason::MaxDecodedPixels => "max_decoded_pixels",
+                model::AssetOmissionReason::MaxImagePixels => "max_image_pixels",
+                model::AssetOmissionReason::MinImageDimension => "min_image_dimension",
+            }
+            .to_string()
+        });
         Asset {
             id: asset.id.0 as u32,
             media_type: asset.media_type,
             origin_part: asset.origin_part,
-            data: asset.bytes.into(),
+            byte_len: u32::try_from(asset.byte_len).unwrap_or(u32::MAX),
+            image_width: asset.image_width.map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+            image_height: asset.image_height.map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+            decode_width: asset.decode_width.map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+            decode_height: asset
+                .decode_height
+                .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+            decoded_pixels: asset
+                .decoded_pixels
+                .map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
+            data: asset.omission_reason.is_none().then(|| asset.bytes.into()),
+            omission_reason,
         }
     }
 }

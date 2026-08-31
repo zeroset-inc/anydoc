@@ -129,16 +129,20 @@ let document = anydoc::to_document(&bytes, None)?;
 let rendered = anydoc::render_document(&document);
 
 // Bound retained payloads without dropping asset identity or provenance:
-let policy = anydoc::AssetRetentionPolicy {
-    max_unique_assets: Some(200),
-    max_total_bytes: Some(32 * 1024 * 1024),
-    max_asset_bytes: Some(32 * 1024 * 1024),
-};
+let policy = anydoc::AssetRetentionPolicy::office_safe();
 let bounded = anydoc::to_document_with_asset_policy(&bytes, None, policy)?;
 
 // Inspect XLSX/XLSM DrawingML ownership without parsing cell content:
 let manifest = anydoc::extract_spreadsheet_assets(&bytes)?;
 ```
+
+The `office_safe` asset policy retains at most 200 embedded-image occurrences and
+32 MiB of encoded payloads. Raster headers are inspected before callers decode
+them: AnyDoc rejects images below 50 pixels on either edge, above 32 Mi pixels,
+or beyond the 64 Mi-pixel document budget, and exposes an aspect-preserving
+decode target whose longest edge is at most 1,536 pixels. Rejected occurrences
+keep their asset id, source part, dimensions when available, and a structured
+`omission_reason`.
 
 ## Features
 
@@ -146,7 +150,7 @@ let manifest = anydoc::extract_spreadsheet_assets(&bytes)?;
 - **Full document structure.** Headings with anchors, bold/italic/strikethrough, inline code and code blocks, links and internal cross-references, bulleted/numbered/nested/task lists with the source's own numbering, tables with merged cells and header rows, block quotes, footnotes and endnotes, and speaker notes.
 - **Equations as LaTeX.** Word and PowerPoint (OMML), OpenDocument and EPUB (MathML), and RTF equations convert to GitHub-flavored math: `$...$` inline and `$$` blocks.
 - **Ordered source provenance.** Slides and sheets remain stable, one-based source units, including empty and skipped units. `render_document_parts` maps Markdown and embedded assets back to those units.
-- **Embedded assets.** Images and embedded objects render as their alt text in the Markdown. The default document retains their bytes; caller-selected `AssetRetentionPolicy` limits can omit payloads while preserving ids, sizes, provenance, and structured omission reasons. XLSX/XLSM DrawingML images retain sheet ownership.
+- **Embedded assets.** Images and embedded objects render as their alt text in the Markdown. Plain conversion preserves upstream's self-contained assets; the opt-in `office_safe` policy applies bounded occurrence, encoded-byte, decoded-pixel, and image-dimension limits while preserving ids, sizes, provenance, bounded decode targets, and structured omission reasons. XLSX/XLSM DrawingML images retain sheet ownership.
 - **Content-based format detection.** The format is read from the bytes themselves (PDF header, RTF open group, OLE stream names, ZIP package mimetype), so mislabeled files still convert correctly.
 - **Fast.** Pure Rust, no ML models, no external services. Median conversion time is under 5ms per document.
 - **Bindings that stay out of the way.** Node.js conversion runs on the libuv thread pool and never blocks the event loop; Python releases the GIL so other threads keep running. TypeScript types and Python stubs ship with the packages.

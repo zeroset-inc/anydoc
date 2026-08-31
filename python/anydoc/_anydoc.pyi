@@ -265,21 +265,38 @@ class Asset:
     origin_part: str
     """Package part or stream the asset came from, for provenance."""
     byte_len: int
+    image_width: int | None
+    image_height: int | None
+    decode_width: int | None
+    decode_height: int | None
+    decoded_pixels: int | None
     data: bytes | None
-    omission_reason: Literal["max_unique_assets", "max_total_bytes", "max_asset_bytes"] | None
+    omission_reason: Literal["max_asset_occurrences", "max_unique_assets", "max_total_bytes", "max_asset_bytes", "max_decoded_pixels", "max_image_pixels", "min_image_dimension"] | None
 
 @final
 class AssetRetentionPolicy:
+    @staticmethod
+    def office_safe() -> AssetRetentionPolicy: ...
     def __init__(
         self,
         *,
+        max_asset_occurrences: int | None = None,
         max_unique_assets: int | None = None,
         max_total_bytes: int | None = None,
         max_asset_bytes: int | None = None,
+        max_decoded_pixels: int | None = None,
+        max_image_pixels: int | None = None,
+        max_image_edge: int | None = None,
+        min_image_dimension: int | None = None,
     ) -> None: ...
+    max_asset_occurrences: int | None
     max_unique_assets: int | None
     max_total_bytes: int | None
     max_asset_bytes: int | None
+    max_decoded_pixels: int | None
+    max_image_pixels: int | None
+    max_image_edge: int | None
+    min_image_dimension: int | None
 
 @final
 class SpreadsheetAssetManifest:

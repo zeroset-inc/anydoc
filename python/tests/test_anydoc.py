@@ -120,6 +120,16 @@ class AnydocTest(unittest.TestCase):
         self.assertEqual(manifest.availability, "unsupported")
         self.assertEqual(manifest.reason, "binary_spreadsheet_assets_unsupported")
 
+    def test_asset_policy_defaults_match_office_image_limits(self):
+        policy = anydoc.AssetRetentionPolicy.office_safe()
+        self.assertEqual(policy.max_asset_occurrences, 200)
+        self.assertEqual(policy.max_total_bytes, 32 * 1024 * 1024)
+        self.assertEqual(policy.max_asset_bytes, 32 * 1024 * 1024)
+        self.assertEqual(policy.max_decoded_pixels, 64 * 1024 * 1024)
+        self.assertEqual(policy.max_image_pixels, 32 * 1024 * 1024)
+        self.assertEqual(policy.max_image_edge, 1536)
+        self.assertEqual(policy.min_image_dimension, 50)
+
     def test_format_detection_reads_content_extension_and_path(self):
         self.assertEqual(anydoc.format_from_bytes(RICH.read_bytes()), "docx")
         # CSV carries no signature: only the extension names it.

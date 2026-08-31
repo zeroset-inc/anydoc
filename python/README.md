@@ -48,10 +48,16 @@ document = anydoc.to_document(data)
 for part in document.rendered_parts:
     unit = document.source_units[part.source_unit_index] if part.source_unit_index is not None else None
 
-# Omit large payloads while retaining asset identity and provenance.
-policy = anydoc.AssetRetentionPolicy(max_unique_assets=200, max_total_bytes=32 * 1024 * 1024)
+# Use bounded Office-safe defaults while retaining asset identity and provenance.
+policy = anydoc.AssetRetentionPolicy.office_safe()
 bounded = anydoc.to_document(data, asset_policy=policy)
 ```
+
+Raster assets expose their original dimensions and an aspect-preserving decode
+target. Defaults cap image occurrences at 200, retained encoded bytes at 32
+MiB, decoded pixels at 64 Mi per document and 32 Mi per image, the decode edge
+at 1,536 pixels, and the minimum useful dimension at 50 pixels. An omitted
+payload keeps its source metadata and a structured `omission_reason`.
 
 ## Scanned pages
 

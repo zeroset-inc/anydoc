@@ -423,16 +423,25 @@ pub struct Asset {
     /// Package part or stream the asset came from, for provenance.
     origin_part: String,
     byte_len: usize,
+    image_width: Option<usize>,
+    image_height: Option<usize>,
+    decode_width: Option<usize>,
+    decode_height: Option<usize>,
+    decoded_pixels: Option<u64>,
     data: Option<Py<PyBytes>>,
-    /// max_unique_assets, max_total_bytes, max_asset_bytes, or None.
+    /// Stable snake-case retention-limit reason, or None.
     omission_reason: Option<&'static str>,
 }
 
 fn omission_reason(reason: model::AssetOmissionReason) -> &'static str {
     match reason {
+        model::AssetOmissionReason::MaxAssetOccurrences => "max_asset_occurrences",
         model::AssetOmissionReason::MaxUniqueAssets => "max_unique_assets",
         model::AssetOmissionReason::MaxTotalBytes => "max_total_bytes",
         model::AssetOmissionReason::MaxAssetBytes => "max_asset_bytes",
+        model::AssetOmissionReason::MaxDecodedPixels => "max_decoded_pixels",
+        model::AssetOmissionReason::MaxImagePixels => "max_image_pixels",
+        model::AssetOmissionReason::MinImageDimension => "min_image_dimension",
     }
 }
 
@@ -442,6 +451,11 @@ pub(crate) fn asset(py: Python<'_>, asset: model::Asset) -> PyResult<Asset> {
         media_type: asset.media_type,
         origin_part: asset.origin_part,
         byte_len: asset.byte_len,
+        image_width: asset.image_width,
+        image_height: asset.image_height,
+        decode_width: asset.decode_width,
+        decode_height: asset.decode_height,
+        decoded_pixels: asset.decoded_pixels,
         data: asset.omission_reason.is_none().then(|| PyBytes::new(py, &asset.bytes).unbind()),
         omission_reason: asset.omission_reason.map(omission_reason),
     })

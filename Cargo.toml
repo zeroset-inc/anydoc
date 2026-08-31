@@ -26,6 +26,7 @@ cfb = "0.14.0"
 csv = "1.4.0"
 flate2 = "1"
 encoding_rs = "0.8.35"
+imagesize = { version = "=0.14.0", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 log = "0.4"
 pdf-inspector = { version = "=1.14.2", default-features = false }
 quick-xml = "0.41.0"

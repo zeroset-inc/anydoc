@@ -95,6 +95,7 @@ dependencies = [
  "csv",
  "encoding_rs",
  "flate2",
+ "imagesize",
  "insta",
  "log",
  "pdf-inspector",
@@ -700,6 +701,12 @@ checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
 dependencies = [
  "cc",
 ]
+
+[[package]]
+name = "imagesize"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09e54e57b4c48b40f7aec75635392b12b3421fa26fe8b4332e63138ed278459c"
 
 [[package]]
 name = "include_dir"

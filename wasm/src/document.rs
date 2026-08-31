@@ -463,8 +463,7 @@ impl From<model::Note> for Note {
     }
 }
 
-/// An embedded binary asset (image, object payload). Bytes are always
-/// retained, so a document stays self-contained.
+/// An embedded binary asset with bounded retention and raster metadata.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Asset {
@@ -474,17 +473,40 @@ pub struct Asset {
     pub media_type: String,
     /// Package part or stream the asset came from, for provenance.
     pub origin_part: String,
+    pub byte_len: usize,
+    pub image_width: Option<usize>,
+    pub image_height: Option<usize>,
+    pub decode_width: Option<usize>,
+    pub decode_height: Option<usize>,
+    pub decoded_pixels: Option<u64>,
     /// Serialized as a `Uint8Array`.
-    pub data: serde_bytes::ByteBuf,
+    pub data: Option<serde_bytes::ByteBuf>,
+    pub omission_reason: Option<&'static str>,
 }
 
 impl From<model::Asset> for Asset {
     fn from(asset: model::Asset) -> Self {
+        let omission_reason = asset.omission_reason.map(|reason| match reason {
+            model::AssetOmissionReason::MaxAssetOccurrences => "max_asset_occurrences",
+            model::AssetOmissionReason::MaxUniqueAssets => "max_unique_assets",
+            model::AssetOmissionReason::MaxTotalBytes => "max_total_bytes",
+            model::AssetOmissionReason::MaxAssetBytes => "max_asset_bytes",
+            model::AssetOmissionReason::MaxDecodedPixels => "max_decoded_pixels",
+            model::AssetOmissionReason::MaxImagePixels => "max_image_pixels",
+            model::AssetOmissionReason::MinImageDimension => "min_image_dimension",
+        });
         Asset {
             id: asset.id.0 as u32,
             media_type: asset.media_type,
             origin_part: asset.origin_part,
-            data: serde_bytes::ByteBuf::from(asset.bytes),
+            byte_len: asset.byte_len,
+            image_width: asset.image_width,
+            image_height: asset.image_height,
+            decode_width: asset.decode_width,
+            decode_height: asset.decode_height,
+            decoded_pixels: asset.decoded_pixels,
+            data: asset.omission_reason.is_none().then(|| serde_bytes::ByteBuf::from(asset.bytes)),
+            omission_reason,
         }
     }
 }

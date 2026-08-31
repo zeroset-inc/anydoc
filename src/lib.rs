@@ -16,7 +16,11 @@ mod package;
 mod render;
 mod shared;
 
-pub use assets::AssetRetentionPolicy;
+pub use assets::{
+    AssetRetentionPolicy, DEFAULT_MAX_ASSET_BYTES, DEFAULT_MAX_ASSET_OCCURRENCES,
+    DEFAULT_MAX_DECODED_PIXELS, DEFAULT_MAX_IMAGE_EDGE, DEFAULT_MAX_IMAGE_PIXELS,
+    DEFAULT_MAX_TOTAL_BYTES, DEFAULT_MIN_IMAGE_DIMENSION,
+};
 pub use error::ConvertError;
 
 use render::markdown::document_to_markdown;

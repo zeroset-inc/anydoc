@@ -65,6 +65,60 @@ fn xlsx_images_keep_sheet_ownership_and_policy_omissions() {
     assert_eq!(omitted.source_units[1].asset_ids, vec![anydoc::model::AssetId(0)]);
 }
 
+#[test]
+fn repeated_asset_references_remain_owned_by_each_source_unit() {
+    use anydoc::model::{Asset, AssetId, Block, Document, ImageSource, Inline, SourceUnit};
+
+    let image = || {
+        Block::Paragraph(vec![Inline::Image {
+            alt: "shared".into(),
+            source: ImageSource::Asset(AssetId(0)),
+        }])
+    };
+    let document = Document {
+        blocks: vec![image(), image()],
+        source_units: vec![
+            SourceUnit {
+                kind: SourceUnitKind::Slide,
+                ordinal: 1,
+                name: None,
+                status: SourceUnitStatus::Parsed,
+                reason: None,
+                start_block: 0,
+                end_block: 1,
+            },
+            SourceUnit {
+                kind: SourceUnitKind::Slide,
+                ordinal: 2,
+                name: None,
+                status: SourceUnitStatus::Parsed,
+                reason: None,
+                start_block: 1,
+                end_block: 2,
+            },
+        ],
+        notes: Vec::new(),
+        assets: vec![Asset {
+            id: AssetId(0),
+            media_type: "image/png".into(),
+            origin_part: "ppt/media/shared.png".into(),
+            byte_len: 3,
+            image_width: Some(100),
+            image_height: Some(100),
+            decode_width: Some(100),
+            decode_height: Some(100),
+            decoded_pixels: Some(10_000),
+            bytes: vec![1, 2, 3],
+            omission_reason: None,
+        }],
+    };
+
+    let parts = anydoc::render_document_parts(&document);
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].asset_ids, vec![AssetId(0)]);
+    assert_eq!(parts[1].asset_ids, vec![AssetId(0)]);
+}
+
 fn image_workbook() -> Vec<u8> {
     let parts = [
         (

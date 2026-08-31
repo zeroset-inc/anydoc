@@ -226,8 +226,7 @@ export interface Note {
 }
 
 /**
- * An embedded binary asset (image, object payload). Bytes are always
- * retained, so a document stays self-contained.
+ * An embedded binary asset with bounded retention and raster metadata.
  */
 export interface Asset {
   /** Index into `Document.assets`, as referenced by an image source. */
@@ -236,6 +235,13 @@ export interface Asset {
   mediaType: string
   /** Package part or stream the asset came from, for provenance. */
   originPart: string
-  data: Uint8Array
+  byteLen: number
+  imageWidth?: number
+  imageHeight?: number
+  decodeWidth?: number
+  decodeHeight?: number
+  decodedPixels?: number
+  data?: Uint8Array
+  omissionReason?: 'max_asset_occurrences' | 'max_unique_assets' | 'max_total_bytes' | 'max_asset_bytes' | 'max_decoded_pixels' | 'max_image_pixels' | 'min_image_dimension'
 }
 "#;

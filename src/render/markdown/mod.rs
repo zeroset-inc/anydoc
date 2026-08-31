@@ -261,8 +261,10 @@ fn collect_asset_ids(blocks: &[Block], all_seen: &mut HashSet<AssetId>, output: 
             }
         }
     }
+    let mut part_seen = HashSet::new();
     let mut found = |id| {
-        if all_seen.insert(id) {
+        all_seen.insert(id);
+        if part_seen.insert(id) {
             output.push(id);
         }
     };
