@@ -25,7 +25,7 @@ concurrency:
 jobs:
   gate:
     name: Version gate
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     outputs:
       commit: ${{ steps.release.outputs.commit }}
       tag: ${{ steps.release.outputs.tag }}
@@ -114,23 +114,23 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            host: blacksmith-8vcpu-ubuntu-2404
+            host: ubuntu-24.04
             manylinux: '2014'
           - target: aarch64-unknown-linux-gnu
-            host: blacksmith-4vcpu-ubuntu-2404-arm
+            host: ubuntu-24.04-arm
             manylinux: '2014'
           - target: x86_64-unknown-linux-musl
-            host: blacksmith-8vcpu-ubuntu-2404
+            host: ubuntu-24.04
             manylinux: musllinux_1_2
           - target: aarch64-unknown-linux-musl
-            host: blacksmith-4vcpu-ubuntu-2404-arm
+            host: ubuntu-24.04-arm
             manylinux: musllinux_1_2
           - target: x86_64-apple-darwin
-            host: blacksmith-6vcpu-macos-latest
+            host: macos-latest
           - target: aarch64-apple-darwin
-            host: blacksmith-6vcpu-macos-latest
+            host: macos-latest
           - target: x86_64-pc-windows-msvc
-            host: blacksmith-8vcpu-windows-2025
+            host: windows-2025
     runs-on: ${{ matrix.host }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -159,23 +159,23 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            host: blacksmith-6vcpu-macos-latest
+            host: macos-latest
           - target: x86_64-apple-darwin
-            host: blacksmith-6vcpu-macos-latest
+            host: macos-latest
             macos_x64: true
           - target: x86_64-pc-windows-msvc
-            host: blacksmith-4vcpu-windows-2025
+            host: windows-2025
           - target: x86_64-unknown-linux-gnu
-            host: blacksmith-4vcpu-ubuntu-2404
+            host: ubuntu-24.04
             image: python:3.13-slim
           - target: aarch64-unknown-linux-gnu
-            host: blacksmith-4vcpu-ubuntu-2404-arm
+            host: ubuntu-24.04-arm
             image: python:3.13-slim
           - target: x86_64-unknown-linux-musl
-            host: blacksmith-4vcpu-ubuntu-2404
+            host: ubuntu-24.04
             image: python:3.13-alpine
           - target: aarch64-unknown-linux-musl
-            host: blacksmith-4vcpu-ubuntu-2404-arm
+            host: ubuntu-24.04-arm
             image: python:3.13-alpine
     runs-on: ${{ matrix.host }}
     steps:
