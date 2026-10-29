@@ -30,7 +30,7 @@ imagesize = { version = "=0.14.0", default-features = false, features = ["bmp", 
 log = "0.4"
 pdf-inspector = { version = "=1.14.2", default-features = false }
 quick-xml = "0.41.0"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 
 [profile.release]
 lto = "thin"
