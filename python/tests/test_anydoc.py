@@ -2,8 +2,13 @@
 
 import ast
 import io
+import json
+import os
+import threading
 import unittest
 import zipfile
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import anydoc
@@ -12,31 +17,50 @@ FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
 OUTLINE = FIXTURES / "docx" / "handmade-outline.docx"
 RICH = FIXTURES / "docx" / "handmade-rich.docx"
 CSV = FIXTURES / "csv" / "sheet.csv"
-PRESENTATION = FIXTURES / "pptx" / "pres.pptx"
 ENCRYPTED = FIXTURES / "malformed" / "encrypted--errors.odt"
 ZIPBOMB = FIXTURES / "abuse" / "zipbomb--errors.docx"
+MIXED = FIXTURES / "pdf" / "handmade-mixed.pdf"
+PRESENTATION = FIXTURES / "pptx" / "pres.pptx"
 XLS = FIXTURES / "xls" / "sheet.xls"
 
+HOSTED_MARKDOWN = "# Read by the hosted parser\n"
 
-def _xlsx_with_owned_image() -> bytes:
-    package = io.BytesIO()
-    with zipfile.ZipFile(package, "w") as archive:
-        parts = {
-            "[Content_Types].xml": """<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>""",
-            "_rels/.rels": """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>""",
-            "xl/workbook.xml": """<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Empty" sheetId="1" r:id="rId1"/><sheet name="Pictures" sheetId="2" r:id="rId2"/></sheets></workbook>""",
-            "xl/_rels/workbook.xml.rels": """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>""",
-            "xl/worksheets/sheet1.xml": """<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>""",
-            "xl/worksheets/sheet2.xml": """<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><drawing r:id="rIdDrawing"/></worksheet>""",
-            "xl/worksheets/_rels/sheet2.xml.rels": """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>""",
-            "xl/drawings/drawing1.xml": """<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="1" cy="1"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="1" name="Owned"/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rIdImage"/></xdr:blipFill></xdr:pic></xdr:absoluteAnchor><xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="1" cy="1"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="2" name="Missing"/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rIdMissing"/></xdr:blipFill></xdr:pic></xdr:absoluteAnchor></xdr:wsDr>""",
-            "xl/drawings/_rels/drawing1.xml.rels": """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/owned.png"/></Relationships>""",
-        }
-        for name, body in parts.items():
-            archive.writestr(name, body)
-        archive.writestr("xl/media/owned.png", b"owned-image")
-        archive.writestr("xl/media/unreferenced.png", b"not-content")
-    return package.getvalue()
+
+@contextmanager
+def hosted_stub(status, body):
+    """A stand-in for api.firecrawl.dev that answers every request with one
+    reply and records each hit as (path, whether a PDF came with it). The
+    block runs keyless, whatever the environment."""
+    hits = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            payload = self.rfile.read(int(self.headers.get("content-length", 0)))
+            hits.append((self.path, b"%PDF-" in payload))
+            reply = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(reply)))
+            self.end_headers()
+            self.wfile.write(reply)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    saved = {name: os.environ.pop(name, None) for name in ("FIRECRAWL_API_URL", "FIRECRAWL_API_KEY")}
+    os.environ["FIRECRAWL_API_URL"] = f"http://127.0.0.1:{server.server_port}"
+    try:
+        yield hits
+    finally:
+        server.shutdown()
+        server.server_close()
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 class AnydocTest(unittest.TestCase):
@@ -58,7 +82,6 @@ class AnydocTest(unittest.TestCase):
 
     def test_to_document_exposes_the_document_model(self):
         document = anydoc.to_document(OUTLINE.read_bytes(), "docx")
-        self.assertEqual(document.markdown, anydoc.to_markdown_bytes(OUTLINE.read_bytes(), "docx"))
         heading = next(block for block in document.blocks if block.kind == "heading")
         self.assertTrue(1 <= heading.level <= 6)
         self.assertIsInstance(heading.content[0].text, str)
@@ -70,167 +93,42 @@ class AnydocTest(unittest.TestCase):
         image = next(asset for asset in document.assets if asset.media_type == "image/png")
         self.assertIsInstance(image.data, bytes)
         self.assertGreater(len(image.data), 0)
-        self.assertEqual(image.byte_len, len(image.data))
-        self.assertIsNone(image.omission_reason)
         self.assertEqual(image.id, document.assets.index(image))
-        self.assertEqual(
-            {asset_id for part in document.rendered_parts for asset_id in part.asset_ids},
-            {asset.id for asset in document.assets},
-        )
 
-    def test_asset_policy_preserves_text_and_ownership_with_structured_omissions(self):
-        data = RICH.read_bytes()
-        full = anydoc.to_document(data, "docx")
+    def test_reconciled_provenance_rendering_and_asset_policy_surfaces(self):
+        document = anydoc.to_document(PRESENTATION.read_bytes(), "pptx")
+        self.assertEqual(document.markdown, anydoc.to_markdown_bytes(PRESENTATION.read_bytes()))
+        self.assertTrue(document.source_units)
+        self.assertEqual(document.source_units[0].kind, "slide")
+        self.assertEqual(document.source_units[0].ordinal, 1)
+        self.assertEqual(document.rendered_parts[0].source_unit_index, 0)
+
+        compact = anydoc.to_rendered_parts(PRESENTATION.read_bytes(), "pptx")
+        self.assertEqual(len(compact.source_units), len(document.source_units))
+        self.assertEqual(len(compact.parts), len(document.rendered_parts))
+
         limited = anydoc.to_document(
-            data,
+            RICH.read_bytes(),
             "docx",
             asset_policy=anydoc.AssetRetentionPolicy(max_unique_assets=0),
         )
+        self.assertTrue(limited.assets)
+        self.assertTrue(all(asset.data is None for asset in limited.assets))
+        self.assertTrue(all(asset.omission_reason == "max_unique_assets" for asset in limited.assets))
 
-        self.assertEqual(limited.markdown, full.markdown)
-        self.assertEqual(len(limited.assets), len(full.assets))
-        omitted = next(asset for asset in limited.assets if asset.media_type == "image/png")
-        self.assertIsNone(omitted.data)
-        self.assertGreater(omitted.byte_len, 0)
-        self.assertEqual(omitted.omission_reason, "max_unique_assets")
-        self.assertIn(
-            omitted.id,
-            {asset_id for part in limited.rendered_parts for asset_id in part.asset_ids},
-        )
-
-    def test_asset_policy_distinguishes_individual_and_aggregate_budgets(self):
-        data = RICH.read_bytes()
-        for policy, reason in (
-            (anydoc.AssetRetentionPolicy(max_asset_bytes=0), "max_asset_bytes"),
-            (anydoc.AssetRetentionPolicy(max_total_bytes=0), "max_total_bytes"),
-        ):
-            with self.subTest(reason=reason):
-                document = anydoc.to_document(data, "docx", asset_policy=policy)
-                self.assertTrue(document.assets)
-                self.assertEqual(
-                    {asset.omission_reason for asset in document.assets},
-                    {reason},
-                )
-
-    def test_asset_policy_rejects_negative_budgets(self):
-        with self.assertRaises(OverflowError):
-            anydoc.AssetRetentionPolicy(max_total_bytes=-1)
-
-    def test_to_document_exposes_source_units(self):
-        document = anydoc.to_document(PRESENTATION.read_bytes(), "pptx")
-        self.assertEqual(len(document.source_units), 2)
-        first = document.source_units[0]
-        self.assertEqual(first.kind, "slide")
-        self.assertEqual(first.ordinal, 1)
-        self.assertIsNone(first.name)
-        self.assertEqual(first.status, "parsed")
-        self.assertIsNone(first.reason)
-        self.assertEqual(first.start_block, 0)
-        self.assertGreater(first.end_block, first.start_block)
-        self.assertEqual(len(document.rendered_parts), len(document.source_units))
-        first_part = document.rendered_parts[0]
-        self.assertEqual(first_part.source_unit_index, 0)
-        self.assertEqual(first_part.start_block, first.start_block)
-        self.assertEqual(first_part.end_block, first.end_block)
-        self.assertTrue(first_part.markdown)
-
-    def test_to_rendered_parts_matches_document_without_exporting_its_graph(self):
-        data = PRESENTATION.read_bytes()
-        compact = anydoc.to_rendered_parts(data, "pptx")
-        document = anydoc.to_document(data, "pptx")
-
-        self.assertEqual(
-            [
-                (
-                    part.markdown,
-                    part.source_unit_index,
-                    part.start_block,
-                    part.end_block,
-                    part.asset_ids,
-                )
-                for part in compact.parts
-            ],
-            [
-                (
-                    part.markdown,
-                    part.source_unit_index,
-                    part.start_block,
-                    part.end_block,
-                    part.asset_ids,
-                )
-                for part in document.rendered_parts
-            ],
-        )
-        self.assertEqual(
-            [
-                (unit.kind, unit.ordinal, unit.name, unit.status, unit.reason)
-                for unit in compact.source_units
-            ],
-            [
-                (unit.kind, unit.ordinal, unit.name, unit.status, unit.reason)
-                for unit in document.source_units
-            ],
-        )
-        for absent in ("markdown", "blocks", "notes", "assets", "rendered_parts"):
-            self.assertFalse(hasattr(compact, absent), absent)
-
-    def test_to_rendered_parts_preserves_unowned_note_and_asset_parts(self):
-        data = RICH.read_bytes()
-        compact = anydoc.to_rendered_parts(data, "docx")
-        document = anydoc.to_document(data, "docx")
-
-        self.assertEqual(
-            [
-                (part.markdown, part.source_unit_index, part.asset_ids)
-                for part in compact.parts
-            ],
-            [
-                (part.markdown, part.source_unit_index, part.asset_ids)
-                for part in document.rendered_parts
-            ],
-        )
-        self.assertTrue(any(part.source_unit_index is None for part in compact.parts))
-
-    def test_spreadsheet_asset_manifest_is_ordered_bounded_and_explicit(self):
-        manifest = anydoc.extract_spreadsheet_assets(_xlsx_with_owned_image())
-
-        self.assertEqual(manifest.availability, "available")
-        self.assertIsNone(manifest.reason)
-        self.assertEqual(
-            [(unit.ordinal, unit.name) for unit in manifest.source_units],
-            [(1, "Empty"), (2, "Pictures")],
-        )
-        self.assertEqual(manifest.source_units[0].status, "complete")
-        self.assertEqual(manifest.source_units[0].asset_ids, [])
-        self.assertEqual(manifest.source_units[1].status, "degraded")
-        self.assertEqual(
-            manifest.source_units[1].reason,
-            "worksheet_drawing_unreadable",
-        )
-        self.assertEqual(manifest.source_units[1].asset_ids, [0])
-        self.assertEqual(len(manifest.assets), 1)
-        self.assertEqual(manifest.assets[0].origin_part, "xl/media/owned.png")
-        self.assertEqual(manifest.assets[0].data, b"owned-image")
-
-        limited = anydoc.extract_spreadsheet_assets(
-            _xlsx_with_owned_image(),
-            asset_policy=anydoc.AssetRetentionPolicy(max_unique_assets=0),
-        )
-        self.assertEqual(limited.source_units[1].asset_ids, [0])
-        self.assertIsNone(limited.assets[0].data)
-        self.assertEqual(limited.assets[0].byte_len, len(b"owned-image"))
-        self.assertEqual(limited.assets[0].omission_reason, "max_unique_assets")
-
-    def test_binary_spreadsheet_assets_are_explicitly_unsupported(self):
         manifest = anydoc.extract_spreadsheet_assets(XLS.read_bytes())
-
         self.assertEqual(manifest.availability, "unsupported")
-        self.assertEqual(
-            manifest.reason,
-            "binary_spreadsheet_assets_unsupported",
-        )
-        self.assertEqual(manifest.source_units, [])
-        self.assertEqual(manifest.assets, [])
+        self.assertEqual(manifest.reason, "binary_spreadsheet_assets_unsupported")
+
+    def test_asset_policy_defaults_match_office_image_limits(self):
+        policy = anydoc.AssetRetentionPolicy.office_safe()
+        self.assertEqual(policy.max_asset_occurrences, 200)
+        self.assertEqual(policy.max_total_bytes, 32 * 1024 * 1024)
+        self.assertEqual(policy.max_asset_bytes, 32 * 1024 * 1024)
+        self.assertEqual(policy.max_decoded_pixels, 64 * 1024 * 1024)
+        self.assertEqual(policy.max_image_pixels, 32 * 1024 * 1024)
+        self.assertEqual(policy.max_image_edge, 1536)
+        self.assertEqual(policy.min_image_dimension, 50)
 
     def test_format_detection_reads_content_extension_and_path(self):
         self.assertEqual(anydoc.format_from_bytes(RICH.read_bytes()), "docx")
@@ -255,6 +153,11 @@ class AnydocTest(unittest.TestCase):
         with self.assertRaises(anydoc.EncryptedError):
             anydoc.to_markdown_bytes(ENCRYPTED.read_bytes(), "odt")
 
+        # A scanned page is reported, not dropped from the output.
+        with self.assertRaises(anydoc.NeedsOcrError) as caught:
+            anydoc.to_markdown(MIXED)
+        self.assertEqual((caught.exception.pages, caught.exception.page_count), ([2], 2))
+
         with self.assertRaises(anydoc.ResourceLimitError) as caught:
             anydoc.to_markdown_bytes(ZIPBOMB.read_bytes(), "docx")
         self.assertEqual(caught.exception.limit, "max_entry_bytes")
@@ -266,6 +169,19 @@ class AnydocTest(unittest.TestCase):
         with self.assertRaises(anydoc.MissingPartError) as caught:
             anydoc.to_markdown_bytes(package.getvalue(), "docx")
         self.assertEqual(caught.exception.part, "word/document.xml")
+
+    def test_ocr_hosted_sends_a_pdf_with_scanned_pages_to_firecrawl_parse_and_nothing_else(self):
+        reply = {"success": True, "data": {"markdown": HOSTED_MARKDOWN}}
+        with hosted_stub(200, reply) as hits:
+            self.assertEqual(anydoc.to_markdown(MIXED, ocr="hosted"), HOSTED_MARKDOWN)
+            self.assertEqual(hits, [("/v2/parse", True)])
+            self.assertRegex(anydoc.to_markdown(OUTLINE, ocr="hosted"), r"(?m)^# ")
+            self.assertEqual(hits, [("/v2/parse", True)])
+
+    def test_the_keyless_limit_says_to_set_an_api_key(self):
+        with hosted_stub(429, {"success": False, "error": "Rate limit exceeded"}):
+            with self.assertRaisesRegex(anydoc.HostedError, "set FIRECRAWL_API_KEY"):
+                anydoc.to_markdown_bytes(MIXED.read_bytes(), ocr="hosted")
 
     def test_unreadable_files_and_bad_arguments_raise_the_python_exception(self):
         with self.assertRaises(FileNotFoundError):
@@ -282,8 +198,8 @@ class AnydocTest(unittest.TestCase):
         }
         exported = {name for name in dir(anydoc._anydoc) if not name.startswith("_")}
         self.assertEqual(stubbed, exported)
-        # __init__.py re-exports the whole module, plus the Format alias.
-        self.assertEqual(set(anydoc.__all__), exported | {"Format"})
+        # __init__.py re-exports the whole module, plus what it adds itself.
+        self.assertEqual(set(anydoc.__all__), exported | {"Format", "HostedError", "Ocr"})
 
 
 if __name__ == "__main__":

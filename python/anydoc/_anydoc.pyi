@@ -8,13 +8,21 @@ Format = Literal[
 ]
 
 class ConvertError(Exception):
-    """Meaningful conversion was impossible. Catch this to handle every kind
+    """A complete conversion was impossible. Catch this to handle every kind
     of failure, or one of the subclasses below to single one out. An
     unreadable file raises `OSError` instead."""
 
 class UnsupportedError(ConvertError):
-    """The format is unknown, or cannot be converted at all: a scanned or
-    image-only PDF needs OCR, which anydoc does not do."""
+    """The format is unknown, or cannot be converted at all."""
+
+class NeedsOcrError(ConvertError):
+    """Pages of a PDF are scanned or image-only and need OCR, which anydoc
+    does not do."""
+
+    pages: list[int]
+    """1-indexed pages that need OCR."""
+    page_count: int
+    """Pages in the document."""
 
 class MalformedError(ConvertError):
     """The document is structurally unusable: no meaningful content could be
@@ -84,26 +92,19 @@ def to_document(
     no document-model form; use `to_markdown_bytes`."""
 
 def to_rendered_parts(data: bytes | bytearray, format: Format | None = None) -> RenderedParts:
-    """Parse and render only ordered Markdown/provenance parts. Embedded
-    payloads are not retained because this compact result cannot expose
-    them."""
+    """Parse and render ordered Markdown/provenance parts."""
 
 def extract_spreadsheet_assets(
     data: bytes | bytearray, *, asset_policy: AssetRetentionPolicy | None = None
 ) -> SpreadsheetAssetManifest:
-    """Extract ordered spreadsheet sheet provenance and embedded DrawingML
-    assets without parsing cells or rendering tables and Markdown."""
+    """Extract ordered sheet and DrawingML asset provenance."""
 
 @final
 class Document:
     markdown: str
-    """Complete Markdown, including source-unit markers and note
-    definitions."""
     rendered_parts: list[RenderedPart]
-    """Ordered source-unit and unowned block ranges."""
     blocks: list[Block]
     source_units: list[SourceUnit]
-    """Source-defined units mapped to half-open ranges in `blocks`."""
     notes: list[Note]
     """Footnote and endnote bodies, referenced from text by a `note_ref`
     inline."""
@@ -111,68 +112,30 @@ class Document:
 
 @final
 class RenderedParts:
-    """Ordered rendered parts and source-unit provenance without the full
-    document model."""
-
     parts: list[RenderedPart]
     source_units: list[SourceUnit]
 
 @final
 class RenderedPart:
-    """Markdown and provenance for one ordered range of a document."""
-
     markdown: str
-    """Markdown for this range, without source-unit boundary comments."""
     source_unit_index: int | None
-    """Index into `Document.source_units`, or `None` for unowned content."""
     start_block: int
     end_block: int
-    """Half-open range into `Document.blocks`."""
     asset_ids: list[int]
-    """Distinct embedded asset ids referenced below this range, in first-use
-    order. Unreferenced assets are assigned to a trailing unowned part."""
 
 @final
 class SourceUnit:
-    """A source-defined unit mapped to a half-open range of top-level blocks."""
-
     kind: Literal["slide", "sheet"]
     ordinal: int
-    """1-based source position."""
     name: str | None
     status: Literal["parsed", "empty", "skipped"]
     reason: str | None
-    """Stable machine-readable explanation when skipped."""
     start_block: int
     end_block: int
 
 @final
-class SpreadsheetAssetManifest:
-    """Compact spreadsheet source-unit and embedded-asset manifest."""
-
-    availability: Literal["available", "unsupported"]
-    reason: str | None
-    """Stable machine-readable explanation when unsupported."""
-    source_units: list[SpreadsheetAssetSourceUnit]
-    assets: list[Asset]
-    """Embedded assets, including caller-policy omissions, indexed by id."""
-
-@final
-class SpreadsheetAssetSourceUnit:
-    """Embedded assets owned by one workbook sheet."""
-
-    ordinal: int
-    """One-based position in workbook order."""
-    name: str | None
-    status: Literal["complete", "degraded"]
-    reason: str | None
-    """Stable machine-readable explanation when degraded."""
-    asset_ids: list[int]
-    """Distinct asset ids referenced by this sheet."""
-
-@final
 class Block:
-    kind: Literal["heading", "paragraph", "list", "table", "block_quote", "code_block", "rule"]
+    kind: Literal["heading", "paragraph", "list", "table", "block_quote", "code_block", "rule", "math"]
     level: int | None
     """heading: 1-6."""
     anchor: str | None
@@ -186,13 +149,13 @@ class Block:
     lang: str | None
     """code_block."""
     text: str | None
-    """code_block."""
+    """code_block, math (LaTeX source without delimiters)."""
 
 @final
 class Inline:
-    kind: Literal["text", "link", "image", "anchor", "note_ref", "line_break"]
+    kind: Literal["text", "link", "image", "anchor", "note_ref", "line_break", "math", "checkbox"]
     """`anchor` is a zero-width marker for an internal link target at this
-    position."""
+    position. `checkbox` is a checkbox control."""
     text: str | None
     style: Style | None
     """text."""
@@ -208,6 +171,8 @@ class Inline:
     """anchor: the anchor id."""
     note_id: str | None
     """note_ref: the id of the note in `Document.notes`."""
+    checked: bool | None
+    """checkbox: its state."""
 
 @final
 class Style:
@@ -249,8 +214,6 @@ class List:
 @final
 class ListItem:
     blocks: list[Block]
-    checked: bool | None
-    """Task-list state, when the item carries a checkbox."""
     marker_label: str | None
     """Literal marker text that overrides the list marker when the source
     number text cannot be reproduced from the marker and position alone
@@ -293,8 +256,7 @@ class Note:
 
 @final
 class Asset:
-    """An embedded binary asset (image, object payload), including provenance
-    for payloads omitted by caller retention policy."""
+    """An embedded asset, possibly omitted by caller retention policy."""
 
     id: int
     """Index into `Document.assets`, as referenced by an image source."""
@@ -303,24 +265,50 @@ class Asset:
     origin_part: str
     """Package part or stream the asset came from, for provenance."""
     byte_len: int
-    """Payload size reported by the container or observed by the parser."""
+    image_width: int | None
+    image_height: int | None
+    decode_width: int | None
+    decode_height: int | None
+    decoded_pixels: int | None
     data: bytes | None
-    """Exact payload, or `None` when caller retention policy omitted it."""
-    omission_reason: Literal["max_unique_assets", "max_total_bytes", "max_asset_bytes"] | None
-    """Configured budget responsible for an omitted payload."""
+    omission_reason: Literal["max_asset_occurrences", "max_unique_assets", "max_total_bytes", "max_asset_bytes", "max_decoded_pixels", "max_image_pixels", "min_image_dimension"] | None
 
 @final
 class AssetRetentionPolicy:
-    """Application budgets for embedded asset payload retention."""
-
-    max_unique_assets: int | None
-    max_total_bytes: int | None
-    max_asset_bytes: int | None
-
+    @staticmethod
+    def office_safe() -> AssetRetentionPolicy: ...
     def __init__(
         self,
         *,
+        max_asset_occurrences: int | None = None,
         max_unique_assets: int | None = None,
         max_total_bytes: int | None = None,
         max_asset_bytes: int | None = None,
+        max_decoded_pixels: int | None = None,
+        max_image_pixels: int | None = None,
+        max_image_edge: int | None = None,
+        min_image_dimension: int | None = None,
     ) -> None: ...
+    max_asset_occurrences: int | None
+    max_unique_assets: int | None
+    max_total_bytes: int | None
+    max_asset_bytes: int | None
+    max_decoded_pixels: int | None
+    max_image_pixels: int | None
+    max_image_edge: int | None
+    min_image_dimension: int | None
+
+@final
+class SpreadsheetAssetManifest:
+    availability: Literal["available", "unsupported"]
+    reason: str | None
+    source_units: list[SpreadsheetAssetSourceUnit]
+    assets: list[Asset]
+
+@final
+class SpreadsheetAssetSourceUnit:
+    ordinal: int
+    name: str | None
+    status: Literal["complete", "degraded"]
+    reason: str | None
+    asset_ids: list[int]

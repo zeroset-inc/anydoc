@@ -9,12 +9,16 @@ mod tables;
 
 use crate::error::ConvertError;
 use crate::model::{Block, Document, Inline, Note, NoteKind, Style, inlines_are_empty};
+use crate::package::xml::{Element, Node, ns};
+use crate::shared::blockstyle::{BlockStyle, StyledRun};
 use crate::shared::delta::rebase_emphasis;
 use crate::shared::fields::field_result;
 use crate::shared::list::{ListEntry, ListKey, MarkerKind, flush_list};
+use crate::shared::math::{math_lines, omath_para_to_tex};
 use crate::shared::text::clean_text;
 use lexer::{Lexer, Token};
 use std::collections::HashMap;
+use std::rc::Rc;
 use table::TableState;
 use tables::{LIST_LEVELS, Prelude, codepage_encoding, parse_prelude};
 
@@ -60,6 +64,9 @@ enum Capture {
     Bookmark,
     /// Inside a `\pict` destination: bytes route to the picture collector.
     Pict,
+    /// Inside a math zone: text routes to the math element under
+    /// construction.
+    Math,
 }
 
 #[derive(Clone, Copy)]
@@ -73,6 +80,8 @@ struct CharState {
     ls: Option<i32>,
     legacy_list: Option<MarkerKind>,
     outline: Option<u8>,
+    /// The block container this paragraph's style names.
+    block: Option<BlockStyle>,
     /// Emphasis the paragraph style itself carries, subtracted from headings.
     style_base: Style,
     suppress: bool,
@@ -92,6 +101,7 @@ impl Default for CharState {
             ls: None,
             legacy_list: None,
             outline: None,
+            block: None,
             style_base: Style::PLAIN,
             suppress: false,
             capture: Capture::None,
@@ -272,6 +282,212 @@ impl PictState {
     }
 }
 
+/// An accumulating `\mmath` zone. Its groups mirror OMML elements, each
+/// named by its first control word (`\mf` is `m:f`), so they are built into
+/// the same element tree the OOXML readers hand the converter: a property
+/// group's text is its value, a run's text is its content, and a property
+/// written as a parameter word on the run (`\msty2`) is a child element.
+struct MathState {
+    /// Group depth of the zone's own group.
+    depth: usize,
+    /// Open groups, innermost last, each with the depth it opened at. The
+    /// first is the zone itself.
+    open: Vec<(usize, Element)>,
+}
+
+impl MathState {
+    fn new(depth: usize) -> Self {
+        MathState { depth, open: vec![(depth, math_elem("zone"))] }
+    }
+
+    fn open_group(&mut self, depth: usize) {
+        self.open.push((depth, math_elem("")));
+    }
+
+    /// Attach the groups opened deeper than `depth` to their parents. A
+    /// group that named no element is transparent.
+    fn close_groups(&mut self, depth: usize) {
+        while self.open.len() > 1 && self.open.last().is_some_and(|(d, _)| *d > depth) {
+            let (_, elem) = self.open.pop().unwrap();
+            let (_, parent) = self.open.last_mut().unwrap();
+            if elem.local.is_empty() {
+                parent.children.extend(elem.children);
+            } else {
+                parent.children.push(Node::Elem(elem));
+            }
+        }
+    }
+
+    /// A math control word inside a group: the first names the group, a
+    /// later one is a property of it, its parameter the value.
+    fn word(&mut self, name: &str, param: Option<i32>) {
+        let Some((_, elem)) = self.open.last_mut() else { return };
+        if elem.local.is_empty() {
+            elem.local = name.to_string();
+            return;
+        }
+        let mut prop = math_elem(name);
+        if let Some(param) = param {
+            prop.children.push(Node::Text(param.to_string()));
+        }
+        elem.children.push(Node::Elem(prop));
+    }
+
+    fn push_text(&mut self, text: String) {
+        if let Some((_, elem)) = self.open.last_mut() {
+            elem.children.push(Node::Text(text));
+        }
+    }
+
+    /// The zone's equations, and whether they are a math paragraph
+    /// (`\moMathPara`), which displays on its own line.
+    fn finish(mut self) -> (Vec<String>, bool) {
+        self.close_groups(0);
+        let (_, zone) = self.open.remove(0);
+        match zone.find(ns::M, "oMathPara") {
+            Some(para) => (omath_para_to_tex(para), true),
+            None => (omath_para_to_tex(&zone), false),
+        }
+    }
+}
+
+fn math_elem(local: &str) -> Element {
+    Element {
+        ns: Some(Rc::from(ns::M)),
+        local: local.to_string(),
+        attrs: Vec::new(),
+        children: Vec::new(),
+    }
+}
+
+/// Every OMML element name, as its rtf control word without the `m` prefix.
+const OMML_NAMES: &[&str] = &[
+    "acc",
+    "accPr",
+    "aln",
+    "alnScr",
+    "argPr",
+    "argSz",
+    "bar",
+    "barPr",
+    "baseJc",
+    "begChr",
+    "borderBox",
+    "borderBoxPr",
+    "box",
+    "boxPr",
+    "brk",
+    "brkBin",
+    "brkBinSub",
+    "cGp",
+    "cGpRule",
+    "chr",
+    "count",
+    "cSp",
+    "ctrlPr",
+    "d",
+    "defJc",
+    "deg",
+    "degHide",
+    "den",
+    "diff",
+    "dispDef",
+    "dPr",
+    "e",
+    "endChr",
+    "eqArr",
+    "eqArrPr",
+    "f",
+    "fName",
+    "fPr",
+    "func",
+    "funcPr",
+    "groupChr",
+    "groupChrPr",
+    "grow",
+    "hideBot",
+    "hideLeft",
+    "hideRight",
+    "hideTop",
+    "interSp",
+    "intLim",
+    "intraSp",
+    "jc",
+    "lim",
+    "limLoc",
+    "limLow",
+    "limLowPr",
+    "limUpp",
+    "limUppPr",
+    "lit",
+    "lMargin",
+    "m",
+    "mathFont",
+    "mathPr",
+    "maxDist",
+    "mc",
+    "mcJc",
+    "mcPr",
+    "mcs",
+    "mPr",
+    "mr",
+    "nary",
+    "naryLim",
+    "naryPr",
+    "noBreak",
+    "nor",
+    "num",
+    "objDist",
+    "oMath",
+    "oMathPara",
+    "oMathParaPr",
+    "opEmu",
+    "phant",
+    "phantPr",
+    "plcHide",
+    "pos",
+    "postSp",
+    "preSp",
+    "r",
+    "rad",
+    "radPr",
+    "rMargin",
+    "rPr",
+    "rSp",
+    "rSpRule",
+    "scr",
+    "sepChr",
+    "show",
+    "shp",
+    "smallFrac",
+    "sPre",
+    "sPrePr",
+    "sSub",
+    "sSubPr",
+    "sSubSup",
+    "sSubSupPr",
+    "sSup",
+    "sSupPr",
+    "strikeBLTR",
+    "strikeH",
+    "strikeTLBR",
+    "strikeV",
+    "sty",
+    "sub",
+    "subHide",
+    "sup",
+    "supHide",
+    "t",
+    "transp",
+    "type",
+    "vertJc",
+    "wrapIndent",
+    "wrapRight",
+    "zeroAsc",
+    "zeroDesc",
+    "zeroWid",
+];
+
 /// Field, note, bookmark, and list-label destination state: frames open at a
 /// group depth and close when the group stack unwinds past it.
 #[derive(Default)]
@@ -284,6 +500,10 @@ struct Destinations {
     listtext: Option<String>,
     /// The `\pict` destination currently accumulating, if any.
     pict: Option<PictState>,
+    /// The math zone currently accumulating, if any.
+    math: Option<MathState>,
+    /// The current paragraph holds a finished math paragraph.
+    math_display: bool,
 }
 
 impl Destinations {
@@ -404,6 +624,7 @@ struct Parser<'a> {
     inlines: Vec<Inline>,
     blocks: Vec<Block>,
     list_run: Vec<ListEntry>,
+    styled: StyledRun,
     counters: Counters,
     table: TableState,
     dest: Destinations,
@@ -427,6 +648,7 @@ impl<'a> Parser<'a> {
             inlines: Vec::new(),
             blocks: Vec::new(),
             list_run: Vec::new(),
+            styled: StyledRun::default(),
             counters: Counters::default(),
             table: TableState::new(),
             dest: Destinations::default(),
@@ -440,6 +662,11 @@ impl<'a> Parser<'a> {
                 Token::Open => {
                     self.flush_pending();
                     self.stack.push(self.state);
+                    if self.state.capture == Capture::Math
+                        && let Some(math) = &mut self.dest.math
+                    {
+                        math.open_group(self.stack.len());
+                    }
                 }
                 Token::Close => {
                     self.flush_pending();
@@ -456,6 +683,13 @@ impl<'a> Parser<'a> {
                     // past its own group (inner property groups close first).
                     if self.dest.pict.as_ref().is_some_and(|p| self.stack.len() < p.depth) {
                         self.finish_pict()?;
+                    }
+                    if let Some(math) = &mut self.dest.math {
+                        if self.stack.len() < math.depth {
+                            self.finish_math();
+                        } else {
+                            math.close_groups(self.stack.len());
+                        }
                     }
                 }
                 Token::Word { name, param } => self.control_word(name, param)?,
@@ -490,6 +724,7 @@ impl<'a> Parser<'a> {
             log::warn!("recovered unbalanced rtf groups");
         }
         self.flush_pending();
+        self.finish_math();
         self.end_paragraph()
     }
 
@@ -511,6 +746,9 @@ impl<'a> Parser<'a> {
     /// Dispatch a control word to its subsystem handler; unhandled words
     /// that name a suppressed destination silence their group.
     fn control_word(&mut self, word: &str, param: Option<i32>) -> Result<(), ConvertError> {
+        if self.math_control(word, param) {
+            return Ok(());
+        }
         if self.text_control(word, param)? {
             return Ok(());
         }
@@ -565,11 +803,9 @@ impl<'a> Parser<'a> {
                 if let Some(def) = def {
                     self.flush_pending();
                     self.state.outline = def.outline;
+                    self.state.block = def.block;
                     self.state.style = def.delta.apply(self.state.style);
-                    // Keep the style definition separate from already-active
-                    // direct formatting. Folding the combined state into the
-                    // base would erase controls that appeared before `\sN`.
-                    self.state.style_base = def.delta.resolve();
+                    self.state.style_base = self.state.style;
                 }
             }
             "par" | "sect" => {
@@ -588,6 +824,7 @@ impl<'a> Parser<'a> {
                 self.state.ls = None;
                 self.state.legacy_list = None;
                 self.state.outline = None;
+                self.state.block = None;
                 self.state.style_base = Style::PLAIN;
             }
             // \page and \column break the flow without ending the
@@ -779,6 +1016,58 @@ impl<'a> Parser<'a> {
         true
     }
 
+    /// Math zone controls: `\mmath` opens a zone, and inside one every math
+    /// control word names the group it starts or sets a property on it.
+    /// The `\mmathPict` fallback picture is skipped.
+    fn math_control(&mut self, word: &str, param: Option<i32>) -> bool {
+        if self.dest.math.is_none() {
+            if word != "mmath" {
+                return false;
+            }
+            if !self.state.suppress {
+                self.flush_pending();
+                self.state.capture = Capture::Math;
+                self.dest.math = Some(MathState::new(self.stack.len()));
+            }
+            return true;
+        }
+        if self.state.capture != Capture::Math {
+            return false;
+        }
+        if word == "mmathPict" {
+            self.flush_pending();
+            self.state.capture = Capture::None;
+            self.state.suppress = true;
+            return true;
+        }
+        match word.strip_prefix('m') {
+            Some(name) if OMML_NAMES.contains(&name) => {
+                self.flush_pending();
+                if let Some(math) = &mut self.dest.math {
+                    math.word(name, param);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn finish_math(&mut self) {
+        let Some(math) = self.dest.math.take() else {
+            return;
+        };
+        let (lines, display) = math.finish();
+        for (i, tex) in lines.into_iter().enumerate() {
+            if i > 0 {
+                self.inlines.push(Inline::LineBreak);
+            }
+            self.inlines.push(Inline::Math(tex));
+        }
+        if display {
+            self.dest.math_display = true;
+        }
+    }
+
     fn set_pict_format(&mut self, format: Option<(&'static str, &'static str)>) {
         if self.state.capture == Capture::Pict
             && let Some(pict) = &mut self.dest.pict
@@ -823,9 +1112,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn set_style(&mut self, style: impl FnOnce(&mut Style)) {
+    fn set_style(&mut self, f: impl FnOnce(&mut Style)) {
         self.flush_pending();
-        style(&mut self.state.style);
+        f(&mut self.state.style);
     }
 
     fn push_char(&mut self, c: char) {
@@ -865,6 +1154,11 @@ impl<'a> Parser<'a> {
             Capture::Bookmark => self.dest.bookmark.push_str(&text),
             // Picture payload bytes are collected raw in the token loop.
             Capture::Pict => {}
+            Capture::Math => {
+                if let Some(math) = &mut self.dest.math {
+                    math.push_text(text);
+                }
+            }
             Capture::None => {
                 if !self.state.suppress {
                     self.inlines.push(Inline::Text { text, style: self.state.style });
@@ -876,7 +1170,7 @@ impl<'a> Parser<'a> {
     /// Flush the finished top-level table, if any, into the block stream.
     fn flush_top_table(&mut self) -> Result<(), ConvertError> {
         if let Some(block) = self.table.take_table(1)? {
-            self.flush_list();
+            self.flush_runs();
             self.blocks.push(block);
         }
         Ok(())
@@ -885,18 +1179,24 @@ impl<'a> Parser<'a> {
     fn end_paragraph(&mut self) -> Result<(), ConvertError> {
         let inlines = std::mem::take(&mut self.inlines);
         let listtext = self.dest.listtext.take();
+        let math_display = std::mem::take(&mut self.dest.math_display);
 
         if self.state.in_table {
-            if !inlines_are_empty(&inlines) {
-                let depth = self.state.itap.max(1);
-                self.table.push_cell_paragraph(depth, Block::Paragraph(inlines));
-            }
+            let depth = self.state.itap.max(1);
+            self.table.push_cell_paragraph(depth, self.state.block, inlines);
             return Ok(());
         }
         self.flush_top_table()?;
 
+        // A styled container absorbs its blank paragraphs: they are the
+        // blank lines of a code block.
+        if let Some(style) = self.state.block {
+            flush_list(&mut self.blocks, &mut self.list_run);
+            self.styled.push(style, inlines, &mut self.blocks);
+            return Ok(());
+        }
         if inlines_are_empty(&inlines) {
-            self.flush_list();
+            self.flush_runs();
             return Ok(());
         }
         // Numbering identity comes from the list tables; the captured label
@@ -904,7 +1204,7 @@ impl<'a> Parser<'a> {
         // advance the sequence and keep their number visible.
         let entry = self.list_entry(listtext.as_deref());
         if let Some(level) = self.state.outline {
-            self.flush_list();
+            self.flush_runs();
             let mut content = inlines;
             rebase_emphasis(&mut content, self.state.style_base);
             if let Some((key, _, number, label)) = &entry
@@ -927,8 +1227,11 @@ impl<'a> Parser<'a> {
             });
             return Ok(());
         }
-        self.flush_list();
-        self.blocks.push(Block::Paragraph(inlines));
+        self.flush_runs();
+        match math_lines(&inlines).filter(|_| math_display) {
+            Some(lines) => self.blocks.extend(lines.into_iter().map(Block::Math)),
+            None => self.blocks.push(Block::Paragraph(inlines)),
+        }
         Ok(())
     }
 
@@ -1000,7 +1303,7 @@ impl<'a> Parser<'a> {
     fn end_cell(&mut self, depth: usize) -> Result<(), ConvertError> {
         let inlines = std::mem::take(&mut self.inlines);
         self.dest.listtext = None;
-        self.table.end_cell(depth, inlines)
+        self.table.end_cell(depth, self.state.block, inlines)
     }
 
     fn end_row(&mut self, depth: usize) -> Result<(), ConvertError> {
@@ -1011,7 +1314,9 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn flush_list(&mut self) {
+    /// Close every open block run before something else is emitted.
+    fn flush_runs(&mut self) {
+        self.styled.flush(&mut self.blocks);
         flush_list(&mut self.blocks, &mut self.list_run);
     }
 
@@ -1024,7 +1329,7 @@ impl<'a> Parser<'a> {
         // Collapse any dangling nested tables outward, then flush.
         self.table.collapse_nested()?;
         self.flush_top_table()?;
-        self.flush_list();
+        self.flush_runs();
         Ok(Document {
             blocks: self.blocks,
             source_units: Vec::new(),
@@ -1062,20 +1367,38 @@ mod tests {
     }
 
     #[test]
-    fn direct_formatting_before_style_is_not_folded_into_the_heading_base() {
-        let direct_before = crate::to_markdown_bytes(
-            br"{\rtf1{\stylesheet{\s1\b\outlinelevel0 Heading;}}\i\s1 Heading\par}",
-            crate::Format::Rtf,
-        )
-        .unwrap();
-        assert_eq!(direct_before, "# *Heading*\n");
+    fn backslash_before_a_line_break_breaks_the_paragraph() {
+        // The paragraph mark Cocoa's RTF writer emits instead of `\par`.
+        for src in
+            ["{\\rtf1 Alpha\\\nBeta\\\nGamma\\\n}", "{\\rtf1 Alpha\\\r\nBeta\\\rGamma\\\r\n}"]
+        {
+            let markdown = crate::to_markdown_bytes(src.as_bytes(), crate::Format::Rtf).unwrap();
+            assert_eq!(markdown, "Alpha\n\nBeta\n\nGamma\n", "source: {src:?}");
+        }
+    }
 
-        let exporter_restatement = crate::to_markdown_bytes(
-            br"{\rtf1{\stylesheet{\s1\b\outlinelevel0 Heading;}}\s1\b Heading\par}",
-            crate::Format::Rtf,
-        )
-        .unwrap();
-        assert_eq!(exporter_restatement, "# Heading\n");
+    #[test]
+    fn body_text_before_a_table_stays_out_of_the_first_cell() {
+        let src = "{\\rtf1 Intro\\\n\\trowd\\cellx2000\\cellx4000 A\\cell B\\cell\\row}";
+        let markdown = crate::to_markdown_bytes(src.as_bytes(), crate::Format::Rtf).unwrap();
+        assert!(markdown.starts_with("Intro\n\n|"), "{markdown}");
+    }
+
+    #[test]
+    fn styled_runs_stop_before_tables_and_work_inside_cells() {
+        let src = br"{\rtf1\ansi{\stylesheet{\s0 Normal;}{\s1 Source Code;}}\pard\plain\s1 before table\par\trowd\cellx2000\pard\plain\intbl\s1 first\par second\cell\row}";
+        let doc = parse(src).unwrap();
+        let [Block::CodeBlock { text: before, .. }, Block::Table(table)] = &doc.blocks[..] else {
+            panic!("unexpected block order: {:?}", doc.blocks)
+        };
+        assert_eq!(before, "before table");
+        let crate::model::CellSlot::Origin(cell) = &table.grid[0][0] else {
+            panic!("expected an origin cell")
+        };
+        let [Block::CodeBlock { text: inside, .. }] = &cell.blocks[..] else {
+            panic!("unexpected cell blocks: {:?}", cell.blocks)
+        };
+        assert_eq!(inside, "first\nsecond");
     }
 
     #[test]

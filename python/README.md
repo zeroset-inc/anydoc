@@ -1,6 +1,7 @@
 # zeroset-anydoc
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/zeroset-inc/anydoc/blob/main/LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/zeroset-anydoc.svg)](https://pypi.org/project/zeroset-anydoc/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/firecrawl/anydoc/blob/main/LICENSE)
 
 Convert Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and PDF files into clean GitHub-Flavored Markdown. Python bindings for the [anydoc](https://github.com/firecrawl/anydoc) Rust crate, built by [Firecrawl](https://firecrawl.dev). Also available as a hosted API through [Firecrawl Parse](https://firecrawl.dev/parse), which adds our OCR models for the scanned pages anydoc can't read on its own.
 
@@ -10,7 +11,7 @@ Every format parses into one shared document model and renders through a single 
 pip install zeroset-anydoc
 ```
 
-The package installs as `zeroset-anydoc` and imports as `anydoc`.
+The fork installs as `zeroset-anydoc` and imports as `anydoc`.
 
 ## Supported formats
 
@@ -39,43 +40,36 @@ markdown = anydoc.to_markdown_bytes(data)
 # Or name it, which signature-less formats (CSV) need:
 markdown = anydoc.to_markdown_bytes(data, "csv")
 
-# Or get Markdown and the document model from one parse. Rendered parts map
-# source units and embedded assets back to exact ranges in document.blocks:
+# Or stop at the document model, which also carries embedded assets:
 document = anydoc.to_document(data)
-markdown = document.markdown
+
+# Slides and sheets remain ordered source units; rendered parts retain their
+# source-unit and embedded-asset ownership.
 for part in document.rendered_parts:
-    blocks = document.blocks[part.start_block : part.end_block]
-    assets = [document.assets[asset_id] for asset_id in part.asset_ids]
+    unit = document.source_units[part.source_unit_index] if part.source_unit_index is not None else None
 
-# Skip the Python document graph when only rendered text and provenance are
-# needed:
-rendered = anydoc.to_rendered_parts(data)
-for part in rendered.parts:
-    source = (
-        rendered.source_units[part.source_unit_index]
-        if part.source_unit_index is not None
-        else None
-    )
+# Use bounded Office-safe defaults while retaining asset identity and provenance.
+policy = anydoc.AssetRetentionPolicy.office_safe()
+bounded = anydoc.to_document(data, asset_policy=policy)
+```
 
-# Read bounded XLSX/XLSM image ownership without parsing spreadsheet cells:
-manifest = anydoc.extract_spreadsheet_assets(xlsx_data)
-for sheet in manifest.source_units:
-    images = [manifest.assets[asset_id] for asset_id in sheet.asset_ids]
+Raster assets expose their original dimensions and an aspect-preserving decode
+target. Defaults cap image occurrences at 200, retained encoded bytes at 32
+MiB, decoded pixels at 64 Mi per document and 32 Mi per image, the decode edge
+at 1,536 pixels, and the minimum useful dimension at 50 pixels. An omitted
+payload keeps its source metadata and a structured `omission_reason`.
 
-# Bound application-level payload retention without losing text, asset ids,
-# or part/sheet provenance. Omitted assets have data=None plus a reason.
-policy = anydoc.AssetRetentionPolicy(
-    max_unique_assets=200,
-    max_total_bytes=32 * 1024 * 1024,
-    max_asset_bytes=32 * 1024 * 1024,
-)
-document = anydoc.to_document(data, asset_policy=policy)
-omitted = [asset for asset in document.assets if asset.data is None]
+## Scanned pages
+
+anydoc converts locally and does not do OCR, so a PDF with scanned or image-only pages raises `NeedsOcrError`. Opt in with `ocr="hosted"` to send that document to [Firecrawl Parse](https://firecrawl.dev/parse). No signup needed. Set `api_key` or `FIRECRAWL_API_KEY` for higher limits.
+
+```python
+markdown = anydoc.to_markdown("scan.pdf", ocr="hosted")
 ```
 
 ## Errors
 
-A conversion raises only when no meaningful Markdown could come out of the file. The exception type names what went wrong:
+A conversion raises only when no complete Markdown could come out of the file. The exception type names what went wrong:
 
 ```python
 try:
@@ -88,14 +82,16 @@ except (anydoc.EncryptedError, anydoc.UnsupportedError) as error:
 
 | Exception            | Raised when                                                         |
 | -------------------- | ------------------------------------------------------------------- |
-| `UnsupportedError`   | Unknown format, or one that cannot be converted (an image-only PDF) |
+| `UnsupportedError`   | Unknown format, or one that cannot be converted                     |
+| `NeedsOcrError`      | Scanned or image-only pages of a PDF, listed in `pages`             |
 | `MalformedError`     | Structurally unusable: no meaningful content could be extracted     |
 | `EncryptedError`     | Encrypted or password-protected                                     |
 | `ResourceLimitError` | Crossed a fixed safety limit (decompression, nesting, node count)   |
 | `MissingPartError`   | A part required for any meaningful output is absent                 |
+| `HostedError`        | `ocr="hosted"` could not get the document through Firecrawl Parse   |
 | `OSError`            | The file could not be read, from `to_markdown` only                 |
 
-The five conversion failures subclass `anydoc.ConvertError`, so catching that handles all of them at once. `MalformedError.part` and `MissingPartError.part` name the package part at fault, `ResourceLimitError.limit` names the limit crossed, and `str(error)` carries the whole message. A `format` argument naming no supported format raises `ValueError`.
+Every conversion failure subclasses `anydoc.ConvertError`, so catching that handles all of them at once. `MalformedError.part` and `MissingPartError.part` name the package part at fault, `ResourceLimitError.limit` names the limit crossed, and `str(error)` carries the whole message. A `format` argument naming no supported format raises `ValueError`.
 
 ## Format detection
 
@@ -109,14 +105,10 @@ anydoc.format_from_path("report.odt")  # 'odt'
 
 ## Images and embedded objects
 
-Markdown cannot embed bytes, so an embedded image renders as its alt text while its record stays on `document.assets`, tagged with a media type and source part. By default `asset.data` carries the bytes. An `AssetRetentionPolicy` can omit payloads by unique count, aggregate bytes, or individual bytes; the same asset id remains in rendered parts and source units, while `data`, `byte_len`, and `omission_reason` expose the structured outcome. Images that carry an external URL render as ordinary Markdown images. Standard XLSX/XLSM DrawingML images retain their sheet and bounded cell placement.
+Markdown cannot embed bytes, so an embedded image renders as its alt text while its record stays on `document.assets`, tagged with a media type and source part. By default `asset.data` carries the bytes. An `AssetRetentionPolicy` can omit payloads by unique count, aggregate bytes, or individual bytes while preserving asset ids, byte lengths, omission reasons, rendered-part ownership, and XLSX/XLSM sheet provenance.
 
-Presentation slides and spreadsheet sheets are exposed through `document.source_units`. Each unit carries its 1-based ordinal, optional source name, extraction status, and a half-open range into `document.blocks`; empty and skipped units are retained.
-
-`document.rendered_parts` is the ordered partition for consuming that model. Each part carries Markdown for its block range, the corresponding source-unit index when one exists, and recursively discovered embedded asset ids. Gaps and assets without honest source-unit provenance remain in unowned parts rather than being attributed to the nearest slide or sheet.
-
-Full behavior notes and benchmarks live in the [repository README](https://github.com/zeroset-inc/anydoc#readme).
+Full behavior notes and benchmarks live in the [repository README](https://github.com/firecrawl/anydoc#readme).
 
 ## License
 
-[MIT](https://github.com/zeroset-inc/anydoc/blob/main/LICENSE)
+[MIT](https://github.com/firecrawl/anydoc/blob/main/LICENSE)

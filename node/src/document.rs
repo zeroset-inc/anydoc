@@ -31,16 +31,12 @@ pub enum SourceUnitStatus {
     skipped,
 }
 
-/// A source-defined unit mapped to a half-open range of top-level blocks.
 #[napi(object)]
 pub struct SourceUnit {
     pub kind: SourceUnitKind,
-    /// 1-based source position.
     pub ordinal: u32,
-    /// Source-defined name, when present.
     pub name: Option<String>,
     pub status: SourceUnitStatus,
-    /// Stable machine-readable explanation when skipped.
     pub reason: Option<String>,
     pub start_block: u32,
     pub end_block: u32,
@@ -77,6 +73,7 @@ pub enum BlockKind {
     blockQuote,
     codeBlock,
     rule,
+    math,
 }
 
 #[napi(object)]
@@ -94,7 +91,7 @@ pub struct Block {
     pub blocks: Option<Vec<Block>>,
     /// codeBlock.
     pub lang: Option<String>,
-    /// codeBlock.
+    /// codeBlock, math (LaTeX source without delimiters).
     pub text: Option<String>,
 }
 
@@ -139,6 +136,7 @@ impl From<model::Block> for Block {
                 Block { lang, text: Some(text), ..Block::of(BlockKind::codeBlock) }
             }
             model::Block::Rule => Block::of(BlockKind::rule),
+            model::Block::Math(tex) => Block { text: Some(tex), ..Block::of(BlockKind::math) },
         }
     }
 }
@@ -153,12 +151,16 @@ pub enum InlineKind {
     anchor,
     noteRef,
     lineBreak,
+    /// An inline formula.
+    math,
+    /// A checkbox control.
+    checkbox,
 }
 
 #[napi(object)]
 pub struct Inline {
     pub kind: InlineKind,
-    /// text.
+    /// text; math (LaTeX source without delimiters).
     pub text: Option<String>,
     /// text.
     pub style: Option<Style>,
@@ -174,6 +176,8 @@ pub struct Inline {
     pub anchor: Option<String>,
     /// noteRef: the id of the note in `Document.notes`.
     pub note_id: Option<String>,
+    /// checkbox: its state.
+    pub checked: Option<bool>,
 }
 
 impl Inline {
@@ -188,6 +192,7 @@ impl Inline {
             source: None,
             anchor: None,
             note_id: None,
+            checked: None,
         }
     }
 }
@@ -217,6 +222,10 @@ impl From<model::Inline> for Inline {
                 Inline { note_id: Some(id), ..Inline::of(InlineKind::noteRef) }
             }
             model::Inline::LineBreak => Inline::of(InlineKind::lineBreak),
+            model::Inline::Math(tex) => Inline { text: Some(tex), ..Inline::of(InlineKind::math) },
+            model::Inline::Checkbox(checked) => {
+                Inline { checked: Some(checked), ..Inline::of(InlineKind::checkbox) }
+            }
         }
     }
 }
@@ -348,8 +357,6 @@ impl From<model::List> for List {
 #[napi(object)]
 pub struct ListItem {
     pub blocks: Vec<Block>,
-    /// Task-list state, when the item carries a checkbox.
-    pub checked: Option<bool>,
     /// Literal marker text that overrides the list marker when the source
     /// number text cannot be reproduced from the marker and position alone
     /// (composite number text such as `1-a)`).
@@ -358,11 +365,7 @@ pub struct ListItem {
 
 impl From<model::ListItem> for ListItem {
     fn from(item: model::ListItem) -> Self {
-        ListItem {
-            blocks: blocks(item.blocks),
-            checked: item.checked,
-            marker_label: item.marker_label,
-        }
+        ListItem { blocks: blocks(item.blocks), marker_label: item.marker_label }
     }
 }
 
@@ -480,8 +483,7 @@ impl From<model::Note> for Note {
     }
 }
 
-/// An embedded binary asset (image, object payload). Bytes are always
-/// retained, so a document stays self-contained.
+/// An embedded binary asset with bounded retention and raster metadata.
 #[napi(object)]
 pub struct Asset {
     /// Index into `Document.assets`, as referenced by an image source.
@@ -490,16 +492,46 @@ pub struct Asset {
     pub media_type: String,
     /// Package part or stream the asset came from, for provenance.
     pub origin_part: String,
-    pub data: Buffer,
+    pub byte_len: u32,
+    pub image_width: Option<u32>,
+    pub image_height: Option<u32>,
+    pub decode_width: Option<u32>,
+    pub decode_height: Option<u32>,
+    pub decoded_pixels: Option<i64>,
+    pub data: Option<Buffer>,
+    pub omission_reason: Option<String>,
 }
 
 impl From<model::Asset> for Asset {
     fn from(asset: model::Asset) -> Self {
+        let omission_reason = asset.omission_reason.map(|reason| {
+            match reason {
+                model::AssetOmissionReason::MaxAssetOccurrences => "max_asset_occurrences",
+                model::AssetOmissionReason::MaxUniqueAssets => "max_unique_assets",
+                model::AssetOmissionReason::MaxTotalBytes => "max_total_bytes",
+                model::AssetOmissionReason::MaxAssetBytes => "max_asset_bytes",
+                model::AssetOmissionReason::MaxDecodedPixels => "max_decoded_pixels",
+                model::AssetOmissionReason::MaxImagePixels => "max_image_pixels",
+                model::AssetOmissionReason::MinImageDimension => "min_image_dimension",
+            }
+            .to_string()
+        });
         Asset {
             id: asset.id.0 as u32,
             media_type: asset.media_type,
             origin_part: asset.origin_part,
-            data: asset.bytes.into(),
+            byte_len: u32::try_from(asset.byte_len).unwrap_or(u32::MAX),
+            image_width: asset.image_width.map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+            image_height: asset.image_height.map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+            decode_width: asset.decode_width.map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+            decode_height: asset
+                .decode_height
+                .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+            decoded_pixels: asset
+                .decoded_pixels
+                .map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
+            data: asset.omission_reason.is_none().then(|| asset.bytes.into()),
+            omission_reason,
         }
     }
 }

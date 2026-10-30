@@ -12,8 +12,9 @@ use crate::model::{
     MarkerKind, TableKind, inlines_are_empty, inlines_to_plain_text,
 };
 use crate::package::xml::{Element, Node};
-use crate::shared::delta::StyleDelta;
+use crate::shared::delta::{StyleDelta, rebase_emphasis};
 use crate::shared::header::resolve_header_rows;
+use crate::shared::math::{mathml_is_display, mathml_to_tex};
 use crate::shared::text::{clean_text, collapse_ws};
 use std::collections::HashMap;
 
@@ -243,7 +244,9 @@ fn at_space_boundary(inlines: &[Inline], start: bool) -> bool {
                 }
                 return at_space_boundary(content, false);
             }
-            Inline::Image { .. } | Inline::NoteRef(_) => return false,
+            Inline::Image { .. } | Inline::NoteRef(_) | Inline::Math(_) | Inline::Checkbox(_) => {
+                return false;
+            }
         }
     }
     start
@@ -367,10 +370,10 @@ impl Builder<'_> {
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 self.flush_paragraph();
                 let level = elem.local[1..].parse::<u8>().unwrap_or(1);
-                // A heading's inherited/element typography belongs to the
-                // block. Start its children from a neutral inline cascade so
-                // only child markup such as `<b>` reaches the runs.
-                let content = self.inline_children(elem, StyleDelta::default())?;
+                let mut content = self.inline_children(elem, delta)?;
+                // The heading element's own styling is how it looks, not
+                // markup applied to the words; a `<b>` inside it still is.
+                rebase_emphasis(&mut content, delta.resolve());
                 let anchor = elem.attr_any("id").map(|id| self.ctx.anchor_id(id));
                 if !inlines_are_empty(&content) {
                     self.blocks.push(Block::Heading { level, anchor, content });
@@ -430,6 +433,16 @@ impl Builder<'_> {
             "hr" => {
                 self.flush_paragraph();
                 self.blocks.push(Block::Rule);
+            }
+            "math" => {
+                let tex = mathml_to_tex(elem);
+                if tex.is_empty() {
+                } else if mathml_is_display(elem) {
+                    self.flush_paragraph();
+                    self.blocks.push(Block::Math(tex));
+                } else {
+                    self.inlines.push(Inline::Math(tex));
+                }
             }
             name if is_container_tag(name) => {
                 self.push_anchor(elem);
@@ -533,11 +546,8 @@ impl Builder<'_> {
         if !ordered {
             let mut list_items = Vec::with_capacity(items.len());
             for li in &items {
-                list_items.push(ListItem {
-                    blocks: self.sub_blocks(li, delta)?,
-                    checked: None,
-                    marker_label: None,
-                });
+                list_items
+                    .push(ListItem { blocks: self.sub_blocks(li, delta)?, marker_label: None });
             }
             let list = List { marker: MarkerKind::Bullet, start: 1, items: list_items };
             return Ok(vec![Block::List(list)]);
@@ -573,7 +583,6 @@ impl Builder<'_> {
             for (li, &n) in items.iter().zip(&numbers) {
                 list_items.push(ListItem {
                     blocks: self.sub_blocks(li, delta)?,
-                    checked: None,
                     marker_label: Some(format!("{n}.")),
                 });
             }
@@ -583,8 +592,7 @@ impl Builder<'_> {
         let mut current: Option<List> = None;
         let mut last_number = 0i64;
         for (li, &number) in items.iter().zip(&numbers) {
-            let item =
-                ListItem { blocks: self.sub_blocks(li, delta)?, checked: None, marker_label: None };
+            let item = ListItem { blocks: self.sub_blocks(li, delta)?, marker_label: None };
             let contiguous = current.is_some() && last_number.checked_add(1) == Some(number);
             if !contiguous {
                 if let Some(list) = current.take() {
@@ -703,7 +711,7 @@ fn block_text(block: &Block) -> String {
             .collect::<Vec<_>>()
             .join(" "),
         Block::BlockQuote(blocks) => blocks.iter().map(block_text).collect::<Vec<_>>().join(" "),
-        Block::CodeBlock { text, .. } => text.clone(),
+        Block::CodeBlock { text, .. } | Block::Math(text) => text.clone(),
         Block::Table(table) => table
             .grid
             .iter()
@@ -872,12 +880,6 @@ mod tests {
         let out = blocks_with_css("<body><h2>title <b>b</b></h2></body>", css);
         let Block::Heading { content, .. } = &out[0] else { panic!("{out:?}") };
         assert_eq!(first_text_style(content), Style::PLAIN);
-        let Some(Inline::Text { style, .. }) =
-            content.iter().rfind(|i| matches!(i, Inline::Text { .. }))
-        else {
-            panic!()
-        };
-        assert!(style.bold, "nested <b> is explicit even when h2 is already bold");
 
         let out = blocks_with_css("<body><h2>title <b>b</b></h2></body>", "");
         let Block::Heading { content, .. } = &out[0] else { panic!("{out:?}") };

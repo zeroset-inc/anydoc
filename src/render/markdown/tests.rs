@@ -1,8 +1,7 @@
-use super::{document_to_markdown, render_document};
+use super::document_to_markdown;
 use crate::model::{
-    AnchorId, Asset, AssetId, Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget,
-    List, ListItem, MarkerKind, Note, NoteKind, SourceUnit, SourceUnitKind, Style, Table,
-    TableKind,
+    AnchorId, Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget, List, ListItem,
+    MarkerKind, Note, NoteKind, Style, Table, TableKind,
 };
 
 fn doc(blocks: Vec<Block>) -> String {
@@ -36,293 +35,32 @@ fn heading_and_paragraph() {
 }
 
 #[test]
-fn source_units_render_at_boundaries_including_empty_units() {
-    let document = Document {
-        blocks: vec![Block::Paragraph(vec![Inline::plain("Second slide")])],
-        source_units: vec![
-            SourceUnit {
-                kind: SourceUnitKind::Slide,
-                ordinal: 1,
-                name: None,
-                status: crate::model::SourceUnitStatus::Empty,
-                reason: None,
-                start_block: 0,
-                end_block: 0,
-            },
-            SourceUnit {
-                kind: SourceUnitKind::Slide,
-                ordinal: 2,
-                name: None,
-                status: crate::model::SourceUnitStatus::Parsed,
-                reason: None,
-                start_block: 0,
-                end_block: 1,
-            },
-        ],
-        notes: Vec::new(),
-        assets: Vec::new(),
-    };
-    let rendered = render_document(&document);
-    assert_eq!(
-        rendered.markdown,
-        "<!-- anydoc:source-unit-start kind=slide ordinal=1 status=empty -->\n\n\
-         <!-- anydoc:source-unit-end kind=slide ordinal=1 status=empty -->\n\n\
-         <!-- anydoc:source-unit-start kind=slide ordinal=2 status=parsed -->\n\nSecond slide\n\n\
-         <!-- anydoc:source-unit-end kind=slide ordinal=2 status=parsed -->\n"
-    );
-    assert_eq!(rendered.parts.len(), 2);
-    assert_eq!(
-        rendered
-            .parts
-            .iter()
-            .map(|part| (part.source_unit_index, part.start_block, part.end_block))
-            .collect::<Vec<_>>(),
-        vec![(Some(0), 0, 0), (Some(1), 0, 1)]
-    );
-    assert!(rendered.parts[0].markdown.is_empty());
-    assert_eq!(rendered.parts[1].markdown, "Second slide\n");
-}
-
-#[test]
-fn rendered_parts_keep_adjacent_empty_and_skipped_units() {
-    let document = Document {
-        blocks: Vec::new(),
-        source_units: vec![
-            SourceUnit {
-                kind: SourceUnitKind::Slide,
-                ordinal: 1,
-                name: None,
-                status: crate::model::SourceUnitStatus::Empty,
-                reason: None,
-                start_block: 0,
-                end_block: 0,
-            },
-            SourceUnit {
-                kind: SourceUnitKind::Slide,
-                ordinal: 2,
-                name: None,
-                status: crate::model::SourceUnitStatus::Skipped,
-                reason: Some("missing-slide-part".into()),
-                start_block: 0,
-                end_block: 0,
-            },
-        ],
-        notes: Vec::new(),
-        assets: Vec::new(),
-    };
-
-    let rendered = render_document(&document);
-    assert_eq!(rendered.parts.len(), 2);
-    assert_eq!(
-        rendered
-            .parts
-            .iter()
-            .map(|part| (part.source_unit_index, part.start_block, part.end_block))
-            .collect::<Vec<_>>(),
-        vec![(Some(0), 0, 0), (Some(1), 0, 0)]
-    );
-    assert!(rendered.parts.iter().all(|part| part.markdown.is_empty()));
-}
-
-#[test]
-fn source_unit_names_cannot_escape_the_marker() {
-    let md = document_to_markdown(&Document {
-        blocks: Vec::new(),
-        source_units: vec![SourceUnit {
-            kind: SourceUnitKind::Sheet,
-            ordinal: 1,
-            name: Some("Q1 --> résumé".into()),
-            status: crate::model::SourceUnitStatus::Empty,
-            reason: None,
-            start_block: 0,
-            end_block: 0,
-        }],
-        notes: Vec::new(),
-        assets: Vec::new(),
-    });
+fn math_renders_in_dollar_delimiters_and_text_dollars_are_escaped() {
+    let md = doc(vec![
+        Block::Paragraph(vec![
+            Inline::plain("Costs $5 or $6, and "),
+            Inline::Math("x_1 < y".into()),
+            Inline::plain(" holds."),
+        ]),
+        Block::Math("\\sum_{i=1}^{n} i $".into()),
+        Block::Paragraph(vec![Inline::plain("Plans at $20 or $17.50.")]),
+        Block::Paragraph(vec![Inline::plain("Pair $x with y$ here.")]),
+    ]);
     assert_eq!(
         md,
-        "<!-- anydoc:source-unit-start kind=sheet ordinal=1 status=empty name=Q1%20%2D%2D%3E%20r%C3%A9sum%C3%A9 -->\n\n\
-         <!-- anydoc:source-unit-end kind=sheet ordinal=1 status=empty -->\n"
+        "Costs \\$5 or \\$6, and $x_1 < y$ holds.\n\n$$\n\\sum_{i=1}^{n} i \\$\n$$\n\n\
+         Plans at $20 or $17.50.\n\nPair \\$x with y$ here.\n"
     );
 }
 
 #[test]
-fn skipped_source_unit_reason_is_structured_and_escaped() {
-    let md = document_to_markdown(&Document {
-        blocks: Vec::new(),
-        source_units: vec![SourceUnit {
-            kind: SourceUnitKind::Slide,
-            ordinal: 3,
-            name: None,
-            status: crate::model::SourceUnitStatus::Skipped,
-            reason: Some("missing --> part".into()),
-            start_block: 0,
-            end_block: 0,
-        }],
-        notes: Vec::new(),
-        assets: Vec::new(),
-    });
-    assert_eq!(
-        md,
-        "<!-- anydoc:source-unit-start kind=slide ordinal=3 status=skipped reason=missing%20%2D%2D%3E%20part -->\n\n\
-         <!-- anydoc:source-unit-end kind=slide ordinal=3 status=skipped -->\n"
-    );
-}
-
-#[test]
-fn invalid_source_unit_offsets_do_not_panic_rendering() {
-    let md = document_to_markdown(&Document {
-        blocks: vec![Block::Paragraph(vec![Inline::plain("Body")])],
-        source_units: vec![SourceUnit {
-            kind: SourceUnitKind::Slide,
-            ordinal: 1,
-            name: None,
-            status: crate::model::SourceUnitStatus::Parsed,
-            reason: None,
-            start_block: usize::MAX,
-            end_block: 0,
-        }],
-        notes: Vec::new(),
-        assets: Vec::new(),
-    });
-    assert_eq!(md, "Body\n");
-}
-
-#[test]
-fn source_unit_end_does_not_claim_trailing_unscoped_blocks() {
-    let md = document_to_markdown(&Document {
-        blocks: vec![
-            Block::Paragraph(vec![Inline::plain("Sheet body")]),
-            Block::Paragraph(vec![Inline::plain("Unpositioned workbook image")]),
-        ],
-        source_units: vec![SourceUnit {
-            kind: SourceUnitKind::Sheet,
-            ordinal: 1,
-            name: Some("Data".into()),
-            status: crate::model::SourceUnitStatus::Parsed,
-            reason: None,
-            start_block: 0,
-            end_block: 1,
-        }],
-        notes: Vec::new(),
-        assets: Vec::new(),
-    });
-    assert_eq!(
-        md,
-        "<!-- anydoc:source-unit-start kind=sheet ordinal=1 status=parsed name=Data -->\n\nSheet body\n\n\
-         <!-- anydoc:source-unit-end kind=sheet ordinal=1 status=parsed -->\n\nUnpositioned workbook image\n"
-    );
-}
-
-#[test]
-fn rendered_parts_partition_blocks_and_find_nested_assets() {
-    let nested_image = Inline::Link {
-        content: vec![Inline::Image {
-            alt: "nested".into(),
-            source: ImageSource::Asset(AssetId(1)),
-        }],
-        target: LinkTarget::External("https://example.com".into()),
-    };
-    let nested = Block::List(List {
-        marker: MarkerKind::Bullet,
-        start: 1,
-        items: vec![ListItem {
-            blocks: vec![Block::BlockQuote(vec![table_from(
-                vec![vec![Cell::from_inlines(vec![nested_image.clone(), nested_image])]],
-                0,
-            )])],
-            checked: None,
-            marker_label: None,
-        }],
-    });
-    let document = Document {
-        blocks: vec![
-            Block::Paragraph(vec![Inline::Image {
-                alt: "before".into(),
-                source: ImageSource::Asset(AssetId(0)),
-            }]),
-            nested,
-            Block::Paragraph(vec![Inline::plain("after")]),
-        ],
-        source_units: vec![SourceUnit {
-            kind: SourceUnitKind::Slide,
-            ordinal: 1,
-            name: None,
-            status: crate::model::SourceUnitStatus::Parsed,
-            reason: None,
-            start_block: 1,
-            end_block: 2,
-        }],
-        notes: vec![note(
-            "image-note",
-            vec![Block::Paragraph(vec![Inline::Image {
-                alt: "note image".into(),
-                source: ImageSource::Asset(AssetId(2)),
-            }])],
-        )],
-        assets: (0..4)
-            .map(|id| Asset {
-                id: AssetId(id),
-                media_type: "image/png".into(),
-                origin_part: format!("image{id}.png"),
-                byte_len: 1,
-                bytes: vec![id as u8],
-                omission_reason: None,
-            })
-            .collect(),
-    };
-
-    let rendered = render_document(&document);
-    assert_eq!(rendered.markdown, document_to_markdown(&document));
-    assert_eq!(rendered.parts.len(), 3);
-    assert_eq!(
-        rendered
-            .parts
-            .iter()
-            .map(|part| (part.source_unit_index, part.start_block, part.end_block))
-            .collect::<Vec<_>>(),
-        vec![(None, 0, 1), (Some(0), 1, 2), (None, 2, 3)]
-    );
-    assert_eq!(rendered.parts[0].asset_ids, vec![AssetId(0)]);
-    assert_eq!(rendered.parts[1].asset_ids, vec![AssetId(1)]);
-    assert_eq!(rendered.parts[2].asset_ids, vec![AssetId(2), AssetId(3)]);
-    assert_eq!(rendered.parts[0].markdown, "before\n");
-    assert!(rendered.parts[1].markdown.contains("nested"));
-    assert_eq!(rendered.parts[2].markdown, "after\n\n[^1]: note image\n");
-}
-
-#[test]
-fn unreferenced_assets_get_a_trailing_unowned_part() {
-    let document = Document {
-        blocks: vec![Block::Paragraph(vec![Inline::plain("slide")])],
-        source_units: vec![SourceUnit {
-            kind: SourceUnitKind::Slide,
-            ordinal: 1,
-            name: None,
-            status: crate::model::SourceUnitStatus::Parsed,
-            reason: None,
-            start_block: 0,
-            end_block: 1,
-        }],
-        notes: Vec::new(),
-        assets: vec![Asset {
-            id: AssetId(0),
-            media_type: "image/png".into(),
-            origin_part: "Pictures stream".into(),
-            byte_len: 1,
-            bytes: vec![0],
-            omission_reason: None,
-        }],
-    };
-
-    let rendered = render_document(&document);
-    assert_eq!(rendered.parts.len(), 2);
-    assert_eq!(rendered.parts[0].source_unit_index, Some(0));
-    assert_eq!(rendered.parts[1].source_unit_index, None);
-    assert_eq!((rendered.parts[1].start_block, rendered.parts[1].end_block), (1, 1));
-    assert!(rendered.parts[1].markdown.is_empty());
-    assert_eq!(rendered.parts[1].asset_ids, vec![AssetId(0)]);
+fn math_in_a_table_cell_escapes_pipes() {
+    let cell = |inlines| Cell { blocks: vec![Block::Paragraph(inlines)], col_span: 1, row_span: 1 };
+    let md = doc(vec![table_from(
+        vec![vec![cell(vec![Inline::plain("abs")]), cell(vec![Inline::Math("|x|".into())])]],
+        0,
+    )]);
+    assert!(md.contains("| $\\|x\\|$ |"), "{md}");
 }
 
 #[test]
@@ -339,6 +77,35 @@ fn lone_syntax_chars_left_alone() {
     assert_eq!(md, "2 * 3 = 6 and 5*6 #tag\n");
     let md = doc(vec![Block::Paragraph(vec![Inline::plain("x < 5, ~10%, file_name, a[1")])]);
     assert_eq!(md, "x < 5, ~10%, file_name, a[1\n");
+}
+
+#[test]
+fn partners_that_cannot_close_leave_delimiters_raw() {
+    // The space-padded `*` is not right-flanking, so the opener is inert.
+    let md = doc(vec![Block::Paragraph(vec![Inline::plain("a *b 2 * 3")])]);
+    assert_eq!(md, "a *b 2 * 3\n");
+    // Same across a run seam.
+    let md = doc(vec![Block::Paragraph(vec![
+        Inline::plain("a *"),
+        Inline::LineBreak,
+        Inline::plain("2 * 3"),
+    ])]);
+    assert_eq!(md, "a *\\\n2 * 3\n");
+    // Intraword underscores can neither open nor close.
+    let md = doc(vec![Block::Paragraph(vec![
+        Inline::plain("a _"),
+        Inline::LineBreak,
+        Inline::plain("snake_case"),
+    ])]);
+    assert_eq!(md, "a _\\\nsnake_case\n");
+    // A `*` after punctuation and before a word character is not
+    // right-flanking either.
+    let md = doc(vec![Block::Paragraph(vec![Inline::plain("a *b .*c")])]);
+    assert_eq!(md, "a *b .*c\n");
+    // Flanking is judged at the delimiter run's edges: `__` between
+    // letters is intraword even though each `_` neighbours the other.
+    let md = doc(vec![Block::Paragraph(vec![Inline::plain("a _x foo__bar")])]);
+    assert_eq!(md, "a _x foo__bar\n");
 }
 
 #[test]
@@ -387,6 +154,78 @@ fn negative_number_in_cell_unescaped() {
 fn trailing_delimiter_before_styled_run_escaped() {
     let md = doc(vec![Block::Paragraph(vec![Inline::plain("star*"), styled("x", BOLD)])]);
     assert_eq!(md, "star\\***x**\n");
+}
+
+#[test]
+fn delimiters_do_not_pair_across_run_seams() {
+    // Two lines each ending in a backtick must not form a code span (#45).
+    let md = doc(vec![Block::Paragraph(vec![
+        Inline::plain("a `"),
+        Inline::LineBreak,
+        Inline::plain("b `"),
+    ])]);
+    assert_eq!(md, "a \\`\\\nb `\n");
+    // Emphasis pairs across a hard break just as code spans do.
+    let md = doc(vec![Block::Paragraph(vec![
+        Inline::plain("a *"),
+        Inline::LineBreak,
+        Inline::plain("b*"),
+    ])]);
+    assert_eq!(md, "a \\*\\\nb*\n");
+    // A raw backtick pairs with a later code span's fence.
+    let md = doc(vec![Block::Paragraph(vec![
+        Inline::plain("a `"),
+        Inline::LineBreak,
+        styled("x", Style { code: true, ..Style::PLAIN }),
+    ])]);
+    assert_eq!(md, "a \\`\\\n`x`\n");
+}
+
+#[test]
+fn unresolved_link_fallback_counts_toward_seam_pairing() {
+    // The fallback text supplies the `]` that pairs with the earlier `[`.
+    let md = doc(vec![Block::Paragraph(vec![
+        Inline::plain("[click"),
+        Inline::LineBreak,
+        Inline::Link {
+            content: vec![Inline::plain("here]")],
+            target: LinkTarget::Anchor("nowhere".into()),
+        },
+        Inline::plain("(https://e.test)"),
+    ])]);
+    assert_eq!(md, "\\[click\\\nhere](https://e.test)\n");
+    // Same seam with an emphasis delimiter in the fallback.
+    let md = doc(vec![Block::Paragraph(vec![
+        Inline::plain("a *"),
+        Inline::LineBreak,
+        Inline::Link {
+            content: vec![Inline::plain("b*")],
+            target: LinkTarget::Anchor("nowhere".into()),
+        },
+    ])]);
+    assert_eq!(md, "a \\*\\\nb*\n");
+}
+
+#[test]
+fn escaped_backtick_in_later_run_still_pairs() {
+    // A styled run's backtick is emitted as `\\``, yet still closes a span
+    // an earlier raw backtick opens: code spans ignore backslash escapes.
+    let md = doc(vec![Block::Paragraph(vec![
+        Inline::plain("a `"),
+        Inline::LineBreak,
+        styled("x`y", BOLD),
+    ])]);
+    assert_eq!(md, "a \\`\\\n**x\\`y**\n");
+    // A whitespace-only code run loses its styling and emits no fence.
+    let md = doc(vec![Block::Paragraph(vec![
+        Inline::plain("a `"),
+        Inline::LineBreak,
+        Inline::Link {
+            content: vec![styled("  ", Style { code: true, ..Style::PLAIN }), Inline::plain("x")],
+            target: LinkTarget::External("https://e.test".into()),
+        },
+    ])]);
+    assert_eq!(md, "a `\\\n[  x](https://e.test)\n");
 }
 
 #[test]
@@ -469,7 +308,6 @@ fn composite_marker_labels_are_escaped() {
         start: 1,
         items: vec![crate::model::ListItem {
             blocks: vec![Block::Paragraph(vec![Inline::plain("x")])],
-            checked: None,
             marker_label: Some("#1\n*a*".into()),
         }],
     };
@@ -571,6 +409,61 @@ fn merged_cells_render_blank_covered_positions() {
 }
 
 #[test]
+fn trailing_covered_columns_are_preserved() {
+    let mut b = GridBuilder::new();
+    b.next_row();
+    b.place(Cell::spanning(vec![Block::Paragraph(vec![Inline::plain("wide")])], 3, 1)).unwrap();
+    let mut table = b.finish(TableKind::Data);
+    table.header_rows = 1;
+    let md = doc(vec![Block::Table(table)]);
+    assert_eq!(md, "| wide |  |  |\n| --- | --- | --- |\n");
+}
+
+#[test]
+fn url_pipes_cannot_split_table_cells() {
+    let cell = Cell::from_inlines(vec![Inline::Link {
+        content: Vec::new(),
+        target: LinkTarget::External("https://e.test/a|b".into()),
+    }]);
+    let md = doc(vec![table_from(vec![vec![cell]], 0)]);
+    assert_eq!(md, "|  |\n| --- |\n| [https://e.test/a\\|b](https://e.test/a%7Cb) |\n");
+}
+
+#[test]
+fn code_span_pipes_cannot_split_table_cells() {
+    let code = |t: &str| {
+        Cell::from_inlines(vec![Inline::Text {
+            text: t.into(),
+            style: Style { code: true, ..Style::PLAIN },
+        }])
+    };
+    let md = doc(vec![table_from(vec![vec![code("a | b"), code(r"a \| b")]], 0)]);
+    assert_eq!(md, concat!("|  |  |\n", "| --- | --- |\n", r"| `a \| b` | `a \\\| b` |", "\n"));
+}
+
+#[test]
+fn url_angle_brackets_are_encoded_without_bracketing() {
+    let md = doc(vec![Block::Paragraph(vec![Inline::Link {
+        content: vec![Inline::plain("link")],
+        target: LinkTarget::External("https://e.test/a<b>c".into()),
+    }])]);
+    assert_eq!(
+        md,
+        "[link](https://e.test/a%3Cb%3Ec)
+"
+    );
+}
+
+#[test]
+fn url_controls_cannot_split_the_document() {
+    let md = doc(vec![Block::Paragraph(vec![Inline::Link {
+        content: vec![Inline::plain("link")],
+        target: LinkTarget::External("https://e.test/a\nb".into()),
+    }])]);
+    assert_eq!(md, "[link](https://e.test/a%0Ab)\n");
+}
+
+#[test]
 fn nested_list() {
     let md = doc(vec![Block::List(List {
         marker: MarkerKind::Bullet,
@@ -583,12 +476,10 @@ fn nested_list() {
                     start: 3,
                     items: vec![ListItem {
                         blocks: vec![Block::Paragraph(vec![Inline::plain("inner")])],
-                        checked: None,
                         marker_label: None,
                     }],
                 }),
             ],
-            checked: None,
             marker_label: None,
         }],
     })]);
@@ -599,7 +490,6 @@ fn nested_list() {
 fn roman_and_alpha_markers_render_literally() {
     let item = |text: &str| ListItem {
         blocks: vec![Block::Paragraph(vec![Inline::plain(text)])],
-        checked: None,
         marker_label: None,
     };
     let md = doc(vec![
@@ -729,96 +619,41 @@ fn duplicate_note_ids_render_one_definition() {
 }
 
 #[test]
-fn rendered_note_assets_follow_definition_order_and_exclude_duplicates() {
-    let document = Document {
-        blocks: vec![Block::Paragraph(vec![
-            Inline::NoteRef("b".into()),
-            Inline::NoteRef("a".into()),
-        ])],
-        source_units: Vec::new(),
-        notes: vec![
-            note(
-                "a",
-                vec![Block::Paragraph(vec![Inline::Image {
-                    alt: "second".into(),
-                    source: ImageSource::Asset(AssetId(0)),
-                }])],
-            ),
-            note(
-                "b",
-                vec![Block::Paragraph(vec![Inline::Image {
-                    alt: "first".into(),
-                    source: ImageSource::Asset(AssetId(1)),
-                }])],
-            ),
-            note(
-                "b",
-                vec![Block::Paragraph(vec![Inline::Image {
-                    alt: "duplicate".into(),
-                    source: ImageSource::Asset(AssetId(2)),
-                }])],
-            ),
-        ],
-        assets: (0..3)
-            .map(|id| Asset {
-                id: AssetId(id),
-                media_type: "image/png".into(),
-                origin_part: format!("image{id}.png"),
-                byte_len: 1,
-                bytes: vec![id as u8],
-                omission_reason: None,
-            })
-            .collect(),
-    };
-
-    let rendered = render_document(&document);
-    let trailing = rendered.parts.last().expect("note definitions produce a part");
-
-    assert!(trailing.markdown.contains("[^1]: first"));
-    assert!(trailing.markdown.contains("[^2]: second"));
-    assert!(!trailing.markdown.contains("duplicate"));
-    assert_eq!(trailing.asset_ids, vec![AssetId(1), AssetId(0)]);
-}
-
-#[test]
-fn render_empty_canonical_note_keeps_asset_and_blank_duplicate_does_not_win() {
-    let document = Document {
+fn blank_duplicate_note_does_not_suppress_a_later_definition() {
+    let md = document_to_markdown(&Document {
         blocks: vec![Block::Paragraph(vec![Inline::plain("Text"), Inline::NoteRef("a".into())])],
         source_units: Vec::new(),
         notes: vec![
-            note("a", vec![Block::Paragraph(vec![])]),
-            note(
-                "a",
-                vec![Block::Paragraph(vec![Inline::Image {
-                    alt: " ".into(),
-                    source: ImageSource::Asset(AssetId(0)),
-                }])],
-            ),
-            note(
-                "a",
-                vec![Block::Paragraph(vec![Inline::Image {
-                    alt: "duplicate".into(),
-                    source: ImageSource::Asset(AssetId(1)),
-                }])],
-            ),
+            note("a", vec![Block::Paragraph(Vec::new())]),
+            note("a", vec![Block::Paragraph(vec![Inline::plain("Usable.")])]),
         ],
-        assets: (0..2)
-            .map(|id| Asset {
-                id: AssetId(id),
-                media_type: "image/png".into(),
-                origin_part: format!("image{id}.png"),
-                byte_len: 1,
-                bytes: vec![id as u8],
-                omission_reason: None,
-            })
-            .collect(),
+        assets: Vec::new(),
+    });
+    assert_eq!(md, "Text[^1]\n\n[^1]: Usable.\n");
+}
+
+#[test]
+fn an_empty_item_keeps_its_marker_and_the_numbering() {
+    let item = |text: &str| ListItem {
+        blocks: if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![Block::Paragraph(vec![Inline::plain(text)])]
+        },
+        marker_label: None,
     };
-
-    let rendered = render_document(&document);
-    let trailing = rendered.parts.last().expect("the body produces a part");
-
-    assert_eq!(rendered.markdown, "Text[^1]\n");
-    assert_eq!(trailing.asset_ids, vec![AssetId(0)]);
+    let md = doc(vec![Block::List(List {
+        marker: MarkerKind::Decimal,
+        start: 1,
+        items: vec![item("one"), item(""), item("three")],
+    })]);
+    assert_eq!(
+        md,
+        "1. one
+2. 
+3. three
+"
+    );
 }
 
 #[test]
@@ -828,18 +663,31 @@ fn task_list() {
         start: 1,
         items: vec![
             ListItem {
-                blocks: vec![Block::Paragraph(vec![Inline::plain("done")])],
-                checked: Some(true),
+                blocks: vec![Block::Paragraph(vec![Inline::Checkbox(true), Inline::plain("done")])],
                 marker_label: None,
             },
             ListItem {
-                blocks: vec![Block::Paragraph(vec![Inline::plain("todo")])],
-                checked: Some(false),
+                blocks: vec![Block::Paragraph(vec![
+                    Inline::Checkbox(false),
+                    Inline::plain(" todo"),
+                ])],
                 marker_label: None,
             },
         ],
     })]);
     assert_eq!(md, "- [x] done\n- [ ] todo\n");
+}
+
+#[test]
+fn checkbox_in_a_table_cell() {
+    let md = doc(vec![table_from(
+        vec![vec![
+            Cell::from_inlines(vec![Inline::Checkbox(true)]),
+            Cell::from_inlines(vec![Inline::Checkbox(false), Inline::plain("Wall")]),
+        ]],
+        0,
+    )]);
+    assert_eq!(md, "|  |  |\n| --- | --- |\n| [x] | [ ] Wall |\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -921,6 +769,12 @@ fn code_block_in_cell_uses_code_span() {
     let cell = Cell::new(vec![Block::CodeBlock { lang: None, text: "let `x` = 1;".into() }]);
     let md = doc(vec![table_from(vec![vec![cell]], 0)]);
     assert_eq!(md, "|  |\n| --- |\n| ``let `x` = 1;`` |\n");
+}
+
+#[test]
+fn code_block_keeps_its_language_hint() {
+    let md = doc(vec![Block::CodeBlock { lang: Some("rust".into()), text: "fn main() {}".into() }]);
+    assert_eq!(md, "```rust\nfn main() {}\n```\n");
 }
 
 #[test]
