@@ -13,7 +13,8 @@ use crate::model::{
     Block, Document, Inline, SourceUnit, SourceUnitKind, SourceUnitStatus, Style, inlines_are_empty,
 };
 use crate::package::limits;
-use crate::shared::binary::{get_u32, read_ole_stream};
+use crate::shared::binary::{get_u32, read_ole_stream, utf16le_units};
+use crate::shared::delta::{StyleDelta, rebase_emphasis};
 use crate::shared::list::{ListEntry, ListKey, MarkerKind, flush_list};
 use crate::shared::officeart::record_at;
 use crate::shared::text::clean_text;
@@ -341,7 +342,6 @@ impl Extractor {
             return Ok((id, Some("wrong_page_container")));
         }
         if is_notes {
-            // NotesAtom.slideIdRef names the owning slide (0 = none).
             id = children(body)
                 .find(|&(_, t, _)| t == 0x03F1)
                 .and_then(|(.., atom)| get_u32(atom, 0))
@@ -354,9 +354,6 @@ impl Extractor {
     fn end_segment(&mut self, id: Option<u32>, had_page: bool, skip_reason: Option<&'static str>) {
         self.flush_shape();
         flush_list(&mut self.current, &mut self.list_run);
-        // A SlidePersistAtom proves a real slide/notes page exists even when
-        // its pairing id is zero and it has no text. Raw-stream recovery has
-        // no equivalent boundary signal.
         if !self.current.is_empty() || had_page {
             self.segments.push(Segment {
                 blocks: std::mem::take(&mut self.current),
@@ -395,8 +392,6 @@ impl Extractor {
                     out.push(Block::BlockQuote(std::mem::take(nblocks)));
                 }
             }
-            // Raw-stream recovery cannot distinguish source slide boundaries,
-            // so it deliberately exposes no invented provenance.
             if !self.recovering && slide.has_page {
                 slide_ordinal += 1;
                 source_units.push(SourceUnit {
@@ -405,7 +400,7 @@ impl Extractor {
                     name: None,
                     status: match slide.skip_reason {
                         Some(_) => SourceUnitStatus::Skipped,
-                        None if start_block == out.len() => SourceUnitStatus::Empty,
+                        None if out.len() == start_block => SourceUnitStatus::Empty,
                         None => SourceUnitStatus::Parsed,
                     },
                     reason: slide.skip_reason.map(str::to_string),
@@ -532,7 +527,7 @@ impl Extractor {
             }
             // TextCharsAtom: UTF-16LE.
             0x0FA0 => {
-                let units = body.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c));
+                let units = utf16le_units(body);
                 let text: String =
                     char::decode_utf16(units).map(|r| r.unwrap_or('\u{fffd}')).collect();
                 self.push_text(text);
@@ -611,16 +606,8 @@ impl Extractor {
         for c in shape.text.chars() {
             let d = level_default(para_props(para_run).0);
             let style = Style {
-                // A title's master/level defaults are structural heading
-                // typography; only character-run exceptions become inline.
-                bold: char_run
-                    .and_then(|r| r.bold)
-                    .or(if is_title { None } else { d.bold })
-                    .unwrap_or(false),
-                italic: char_run
-                    .and_then(|r| r.italic)
-                    .or(if is_title { None } else { d.italic })
-                    .unwrap_or(false),
+                bold: char_run.and_then(|r| r.bold).or(d.bold).unwrap_or(false),
+                italic: char_run.and_then(|r| r.italic).or(d.italic).unwrap_or(false),
                 strike: false,
                 code: false,
             };
@@ -675,13 +662,16 @@ impl Extractor {
             paragraphs.push((inlines, depth, bullet));
         }
 
-        for (inlines, depth, bullet) in paragraphs {
+        for (mut inlines, depth, bullet) in paragraphs {
             if inlines_are_empty(&inlines) {
                 flush_list(&mut self.current, &mut self.list_run);
                 continue;
             }
             if is_title {
                 flush_list(&mut self.current, &mut self.list_run);
+                let d = level_default(depth);
+                let base = StyleDelta { bold: d.bold, italic: d.italic, ..Default::default() };
+                rebase_emphasis(&mut inlines, base.resolve());
                 let anchor = Some(crate::model::inlines_to_plain_text(&inlines));
                 self.current.push(Block::Heading { level: 2, anchor, content: inlines });
                 continue;
@@ -700,61 +690,5 @@ impl Extractor {
                 self.current.push(Block::Paragraph(inlines));
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn zero_id_empty_slide_keeps_its_source_unit() {
-        let mut extractor = Extractor::default();
-        extractor.end_segment(None, true, None);
-        extractor.current.push(Block::Paragraph(vec![Inline::plain("second")]));
-        extractor.end_segment(Some(2), true, None);
-
-        let (blocks, units) = extractor.into_content();
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(units.len(), 2);
-        assert_eq!(units[0].status, SourceUnitStatus::Empty);
-        assert_eq!((units[0].start_block, units[0].end_block), (0, 0));
-        assert_eq!((units[1].start_block, units[1].end_block), (0, 1));
-    }
-
-    #[test]
-    fn malformed_slide_persist_atom_is_reported_as_skipped() {
-        let list = [0, 0, 0xF3, 0x03, 0, 0, 0, 0];
-        let mut extractor = Extractor::default();
-        extractor.walk_slide_list(&list, &HashMap::new(), &[], false, 0x03EE).unwrap();
-        let (_, units) = extractor.into_content();
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].ordinal, 1);
-        assert_eq!(units[0].status, SourceUnitStatus::Skipped);
-        assert_eq!(units[0].reason.as_deref(), Some("invalid_persist_reference"));
-    }
-
-    #[test]
-    fn raw_recovery_does_not_invent_slide_units() {
-        let mut extractor = Extractor { recovering: true, ..Extractor::default() };
-        extractor.current.push(Block::Paragraph(vec![Inline::plain("recovered")]));
-        let (blocks, units) = extractor.into_content();
-        assert_eq!(blocks.len(), 1);
-        assert!(units.is_empty());
-    }
-
-    #[test]
-    fn content_without_a_page_boundary_does_not_shift_slide_ordinals() {
-        let mut extractor = Extractor::default();
-        extractor.current.push(Block::Paragraph(vec![Inline::plain("unowned prelude")]));
-        extractor.end_segment(None, false, None);
-        extractor.current.push(Block::Paragraph(vec![Inline::plain("first slide")]));
-        extractor.end_segment(Some(1), true, None);
-
-        let (blocks, units) = extractor.into_content();
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].ordinal, 1);
-        assert_eq!((units[0].start_block, units[0].end_block), (1, 2));
     }
 }

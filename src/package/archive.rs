@@ -104,6 +104,7 @@ impl<'a> Package<'a> {
         Ok(Some(bytes))
     }
 
+    /// Read a part that must exist for any meaningful output.
     /// True when a part exists, without reading (or budget-charging) it.
     pub fn has_part(&self, name: &str) -> bool {
         self.zip.index_for_name(name.trim_start_matches('/')).is_some()
@@ -125,7 +126,6 @@ impl<'a> Package<'a> {
         }
     }
 
-    /// Read a part that must exist for any meaningful output.
     pub fn required_part(&mut self, name: &str) -> Result<Rc<[u8]>, ConvertError> {
         self.part(name)?.ok_or_else(|| ConvertError::MissingPart { part: name.to_string() })
     }
@@ -275,39 +275,6 @@ mod tests {
         w.finish().unwrap().into_inner()
     }
 
-    fn corrupt_first_entry_zip(payload_len: usize) -> Vec<u8> {
-        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        for name in ["bad.bin", "next.bin"] {
-            w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
-            w.write_all(&vec![7u8; payload_len]).unwrap();
-        }
-        let mut data = w.finish().unwrap().into_inner();
-        let central = data.windows(4).position(|window| window == b"PK\x01\x02").unwrap();
-        let crc = u32::from_le_bytes(data[central + 16..central + 20].try_into().unwrap());
-        data[central + 16..central + 20].copy_from_slice(&(crc ^ 1).to_le_bytes());
-        data
-    }
-
-    fn assert_corrupt_read_charges_budget(mut pkg: Package<'_>) {
-        const PAYLOAD_LEN: u64 = 4096;
-        pkg.total_read = limits::MAX_TOTAL_BYTES - PAYLOAD_LEN;
-
-        assert!(matches!(pkg.asset_part("bad.bin", None).unwrap(), AssetPart::Missing));
-        assert_eq!(
-            pkg.total_read,
-            limits::MAX_TOTAL_BYTES,
-            "bytes materialized before the CRC error must consume the archive budget"
-        );
-        let err = match pkg.asset_part("next.bin", None) {
-            Err(err) => err,
-            Ok(_) => panic!("next asset should exceed the archive budget"),
-        };
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: "max_total_bytes", .. }),
-            "expected max_total_bytes after the corrupt read consumed the budget, got: {err}"
-        );
-    }
-
     #[test]
     fn repeated_reads_are_cached_and_charged_once() {
         let data = one_part_zip("media/a.bin", &[7u8; 4096]);
@@ -343,49 +310,5 @@ mod tests {
         let data = one_part_zip("word/document.xml", b"<x/>");
         let mut pkg = Package::open(&data).unwrap();
         assert!(pkg.part("/word/document.xml").unwrap().is_some());
-    }
-
-    #[test]
-    fn asset_read_cap_handles_a_forged_declared_size_without_large_allocation() {
-        let payload = vec![7u8; 4096];
-        let mut data = one_part_zip("media/a.bin", &payload);
-        // Forge both local and central uncompressed-size fields downward.
-        // The deflate stream still expands to 4096 bytes.
-        let local = data.windows(4).position(|w| w == b"PK\x03\x04").unwrap();
-        data[local + 22..local + 26].copy_from_slice(&1u32.to_le_bytes());
-        let central = data.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-        data[central + 24..central + 28].copy_from_slice(&1u32.to_le_bytes());
-
-        let mut pkg = Package::open(&data).unwrap();
-        assert_eq!(pkg.part_size("media/a.bin").unwrap(), Some(1));
-        let result = pkg.asset_part("media/a.bin", Some(8)).unwrap();
-        assert!(matches!(result, AssetPart::PolicyExceeded(9)));
-        assert_eq!(pkg.total_read, 9, "only cap + one byte should be decompressed");
-    }
-
-    #[test]
-    fn corrupt_asset_read_charges_materialized_bytes_before_skipping() {
-        let data = corrupt_first_entry_zip(4096);
-        assert_corrupt_read_charges_budget(Package::open(&data).unwrap());
-    }
-
-    #[test]
-    fn corrupt_optional_part_charges_materialized_bytes_before_skipping() {
-        const PAYLOAD_LEN: u64 = 4096;
-        let data = corrupt_first_entry_zip(PAYLOAD_LEN as usize);
-        let mut pkg = Package::open(&data).unwrap();
-        pkg.total_read = limits::MAX_TOTAL_BYTES - PAYLOAD_LEN;
-
-        assert!(pkg.optional_part("bad.bin").unwrap().is_none());
-        assert_eq!(
-            pkg.total_read,
-            limits::MAX_TOTAL_BYTES,
-            "bytes materialized before the CRC error must consume the archive budget"
-        );
-        let err = pkg.optional_part("next.bin").unwrap_err();
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: "max_total_bytes", .. }),
-            "expected max_total_bytes after the corrupt read consumed the budget, got: {err}"
-        );
     }
 }

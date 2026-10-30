@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/anydoc.svg)](https://crates.io/crates/anydoc)
 [![npm](https://img.shields.io/npm/v/@firecrawl/anydoc.svg)](https://www.npmjs.com/package/@firecrawl/anydoc)
-[![PyPI](https://img.shields.io/pypi/v/firecrawl-anydoc.svg)](https://pypi.org/project/firecrawl-anydoc/)
+[![PyPI](https://img.shields.io/pypi/v/zeroset-anydoc.svg)](https://pypi.org/project/zeroset-anydoc/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![skills.sh](https://skills.sh/b/firecrawl/anydoc)](https://skills.sh/firecrawl/anydoc)
 
@@ -30,6 +30,7 @@ The [skill](skills/convert-documents-to-markdown/SKILL.md) teaches the agent to 
 npx @firecrawl/anydoc report.docx               # Markdown to stdout
 npx @firecrawl/anydoc slides.pptx -o slides.md  # or to a file
 npx @firecrawl/anydoc - --format csv < data.csv # read stdin
+npx @firecrawl/anydoc scan.pdf --ocr hosted     # scanned pages via Firecrawl Parse
 ```
 
 `npx` downloads the prebuilt binary for your platform on first run. For a permanent `anydoc` command, install globally with `npm install -g @firecrawl/anydoc`. Run `anydoc --help` for all options.
@@ -61,7 +62,7 @@ const document = await toDocument(bytes);
 ### Python
 
 ```bash
-pip install firecrawl-anydoc
+pip install zeroset-anydoc
 ```
 
 ```python
@@ -123,13 +124,33 @@ let markdown = anydoc::to_markdown_bytes(&bytes, anydoc::Format::Csv)?;
 
 // Or stop at the document model, which also carries embedded assets:
 let document = anydoc::to_document(&bytes, None)?;
+
+// Preserve ordered slide/sheet provenance and asset ownership:
+let rendered = anydoc::render_document(&document);
+
+// Bound retained payloads without dropping asset identity or provenance:
+let policy = anydoc::AssetRetentionPolicy::office_safe();
+let bounded = anydoc::to_document_with_asset_policy(&bytes, None, policy)?;
+
+// Inspect XLSX/XLSM DrawingML ownership without parsing cell content:
+let manifest = anydoc::extract_spreadsheet_assets(&bytes)?;
 ```
+
+The `office_safe` asset policy retains at most 200 embedded-image occurrences and
+32 MiB of encoded payloads. Raster headers are inspected before callers decode
+them: AnyDoc rejects images below 50 pixels on either edge, above 32 Mi pixels,
+or beyond the 64 Mi-pixel document budget, and exposes an aspect-preserving
+decode target whose longest edge is at most 1,536 pixels. Rejected occurrences
+keep their asset id, source part, dimensions when available, and a structured
+`omission_reason`.
 
 ## Features
 
 - **One output for every format.** Each format parses into a shared document model and renders through a single Markdown serializer, so escaping, tables, heading anchors, and footnotes behave identically whether the input was a `.doc` from 2003 or a `.pptx` from yesterday.
 - **Full document structure.** Headings with anchors, bold/italic/strikethrough, inline code and code blocks, links and internal cross-references, bulleted/numbered/nested/task lists with the source's own numbering, tables with merged cells and header rows, block quotes, footnotes and endnotes, and speaker notes.
-- **Embedded assets.** Images and embedded objects render as their alt text in the Markdown, and the raw bytes stay available on the document model, tagged with their media type. Images with an external URL become ordinary Markdown images.
+- **Equations as LaTeX.** Word and PowerPoint (OMML), OpenDocument and EPUB (MathML), and RTF equations convert to GitHub-flavored math: `$...$` inline and `$$` blocks.
+- **Ordered source provenance.** Slides and sheets remain stable, one-based source units, including empty and skipped units. `render_document_parts` maps Markdown and embedded assets back to those units.
+- **Embedded assets.** Images and embedded objects render as their alt text in the Markdown. Plain conversion preserves upstream's self-contained assets; the opt-in `office_safe` policy applies bounded occurrence, encoded-byte, decoded-pixel, and image-dimension limits while preserving ids, sizes, provenance, bounded decode targets, and structured omission reasons. XLSX/XLSM DrawingML images retain sheet ownership.
 - **Content-based format detection.** The format is read from the bytes themselves (PDF header, RTF open group, OLE stream names, ZIP package mimetype), so mislabeled files still convert correctly.
 - **Fast.** Pure Rust, no ML models, no external services. Median conversion time is under 5ms per document.
 - **Bindings that stay out of the way.** Node.js conversion runs on the libuv thread pool and never blocks the event loop; Python releases the GIL so other threads keep running. TypeScript types and Python stubs ship with the packages.
@@ -156,32 +177,32 @@ anydoc is measured against six other converters on 100 real-world documents span
 | tool         | formats   | median ms | docs judged | score  | completeness | structure | formatting | cleanliness |
 | ------------ | --------- | --------- | ----------- | ------ | ------------ | --------- | ---------- | ----------- |
 | anydoc       | **14/14** | **4.4**   | 94          | **81** | **87**       | **79**    | **78**     | **81**      |
-| libreoffice  | 12/14     | 1129.5    | 87          | 39     | 59           | 41        | 40         | 24          |
-| unstructured | 8/14      | 572.9     | 58          | 62     | 76           | 59        | 50         | 63          |
-| markitdown   | 6/14      | 134.8     | 33          | 64     | 78           | 66        | 60         | 52          |
-| pandoc       | 5/14      | 102.1     | 34          | 56     | 73           | 57        | 56         | 38          |
-| docling      | 4/14      | 513.6     | 21          | 57     | 60           | 59        | 57         | 51          |
-| mammoth      | 1/14      | 52.5      | 8           | 69     | 80           | 72        | 74         | 51          |
+| libreoffice  | 12/14     | 1129.5    | 87          | 40     | 59           | 42        | 40         | 24          |
+| unstructured | 8/14      | 572.9     | 58          | 63     | 76           | 59        | 51         | 63          |
+| markitdown   | 6/14      | 134.8     | 33          | 65     | 78           | 66        | 60         | 52          |
+| pandoc       | 5/14      | 102.1     | 34          | 56     | 74           | 57        | 56         | 38          |
+| docling      | 4/14      | 513.6     | 21          | 57     | 60           | 60        | 57         | 51          |
+| mammoth      | 1/14      | 52.5      | 8           | 70     | 84           | 71        | 75         | 51          |
 
 Per format, like for like:
 
 | format | anydoc | libreoffice | unstructured | markitdown | pandoc | docling | mammoth |
 | ------ | ------ | ----------- | ------------ | ---------- | ------ | ------- | ------- |
 | doc    | **87** | 57          | 67           | -          | -      | -       | -       |
-| docm   | **85** | 45          | -            | -          | -      | -       | -       |
-| docx   | **86** | 54          | 53           | 73         | 67     | 71      | 69      |
+| docm   | **84** | 48          | -            | -          | -      | -       | -       |
+| docx   | **88** | 56          | 53           | 71         | 68     | 71      | 70      |
 | epub   | **77** | -           | 72           | 72         | 52     | -       | -       |
 | odp    | **86** | 23          | -            | -          | -      | -       | -       |
 | ods    | **82** | 38          | -            | -          | -      | -       | -       |
-| odt    | **80** | 52          | 68           | -          | 60     | -       | -       |
+| odt    | **80** | 51          | 68           | -          | 60     | -       | -       |
 | ppt    | **80** | 26          | -            | -          | -      | -       | -       |
-| pptx   | **75** | 24          | -            | 61         | -      | 52      | -       |
-| rtf    | **88** | 54          | 45           | -          | 44     | -       | -       |
+| pptx   | **74** | 24          | -            | 66         | -      | 52      | -       |
+| rtf    | **88** | 53          | 46           | -          | 45     | -       | -       |
 | xls    | **80** | 38          | 66           | 62         | -      | -       | -       |
 | xlsm   | **76** | 32          | -            | -          | -      | -       | -       |
 | xlsx   | **72** | 30          | 66           | 55         | -      | 47      | -       |
 
-**How quality was scored:** an LLM judge (Claude Sonnet 5) compares two tools' outputs blind against ground truth: the document's first six pages, rendered to images by LibreOffice. Each output is scored on completeness, structure, formatting, and cleanliness. Every pair is judged twice with the outputs swapped to cancel position bias, for 481 verdicts in total. Each tool's `score` averages its per-format scores over the formats it supports, so a corpus heavy in one format can't skew it. It also means each row averages a different set of formats (mammoth's 69 is docx alone, while anydoc's 81 spans all fourteen), so the per-format table is the fair comparison.
+**How quality was scored:** an LLM judge (Claude Sonnet 5) compares two tools' outputs blind against ground truth: the document's first six pages, rendered to images by LibreOffice. Each output is scored on completeness, structure, formatting, and cleanliness. Every pair is judged twice with the outputs swapped to cancel position bias, for 482 verdicts in total. Each tool's `score` averages its per-format scores over the formats it supports, so a corpus heavy in one format can't skew it. It also means each row averages a different set of formats (mammoth's 69 is docx alone, while anydoc's 81 spans all fourteen), so the per-format table is the fair comparison.
 
 Speed is one warm conversion per document on a Ryzen 9 9950X3D (Windows 11, 64 GB DDR5-6400). anydoc and the Python libraries are timed with process spawn excluded; the CLI tools include it, since that is how they are used. The harness lives in [`bench/`](bench/README.md); the corpus is not redistributable and is not in the repo.
 
@@ -199,21 +220,19 @@ Format::from_path(Path::new("report.odt")); // Some(Format::Odt)
 
 The same three functions exist in Node (`formatFromBytes`, ...) and Python (`anydoc.format_from_bytes`, ...).
 
-## Source provenance
-
-`to_document` preserves presentation slides and spreadsheet sheets in `document.source_units` (`sourceUnits` in Node). Each unit carries its 1-based ordinal, optional source name, extraction status, and a half-open range into the top-level block list. Empty and skipped units remain visible instead of shifting later page or sheet numbers. Markdown output preserves the same boundaries in paired HTML comments.
-
-Standard XLSX/XLSM DrawingML images are retained in `document.assets` and placed in their anchored cells when those cells are inside the used range. Image-only, absolute-positioned, and distant-anchor images remain scoped to their sheet without expanding a sparse grid.
-
 ## Errors
 
-A conversion returns `Err` only when no meaningful Markdown could come out of the file. `ConvertError` names what went wrong:
+A conversion returns `Err` only when no complete Markdown could come out of the file. `ConvertError` names what went wrong:
 
 ```rust
 match anydoc::to_markdown(path) {
     Ok(markdown) => Some(markdown),
     // No document comes out of these, so record the file and take the next one.
-    Err(error @ (ConvertError::Encrypted | ConvertError::Unsupported(_))) => {
+    Err(
+        error @ (ConvertError::Encrypted
+        | ConvertError::Unsupported(_)
+        | ConvertError::NeedsOcr { .. }),
+    ) => {
         unconverted.push((path, error));
         None
     }
@@ -223,7 +242,8 @@ match anydoc::to_markdown(path) {
 
 | Variant         | Meaning                                                             |
 | --------------- | ------------------------------------------------------------------- |
-| `Unsupported`   | Unknown format, or one that cannot be converted (an image-only PDF) |
+| `Unsupported`   | Unknown format, or one that cannot be converted                     |
+| `NeedsOcr`      | Scanned or image-only pages of a PDF, listed in `pages`             |
 | `Malformed`     | Structurally unusable: no meaningful content could be extracted     |
 | `Encrypted`     | Encrypted or password-protected                                     |
 | `ResourceLimit` | Crossed a fixed safety limit (decompression, nesting, node count)   |
@@ -231,6 +251,8 @@ match anydoc::to_markdown(path) {
 | `Io`            | The file could not be read, from `to_markdown` only                 |
 
 Node and wasm publish the variant name on `error.code`; Python raises one `anydoc.ConvertError` subclass per variant, or `OSError` when the file cannot be read.
+
+anydoc converts locally and does not do OCR, so a PDF with scanned pages fails with `NeedsOcr`. Opt in with `ocr: 'hosted'` in Node, `ocr="hosted"` in Python or `--ocr hosted` on the CLI to send that document to [Firecrawl Parse](https://firecrawl.dev/parse). No signup needed. Set `FIRECRAWL_API_KEY` for higher limits.
 
 ## How it works
 

@@ -16,13 +16,17 @@ mod package;
 mod render;
 mod shared;
 
-pub use assets::AssetRetentionPolicy;
+pub use assets::{
+    AssetRetentionPolicy, DEFAULT_MAX_ASSET_BYTES, DEFAULT_MAX_ASSET_OCCURRENCES,
+    DEFAULT_MAX_DECODED_PIXELS, DEFAULT_MAX_IMAGE_EDGE, DEFAULT_MAX_IMAGE_PIXELS,
+    DEFAULT_MAX_TOTAL_BYTES, DEFAULT_MIN_IMAGE_DIMENSION,
+};
 pub use error::ConvertError;
+
+use render::markdown::document_to_markdown;
 pub use render::markdown::{
     RenderedDocument, RenderedPart, render_document, render_document_parts,
 };
-
-use render::markdown::document_to_markdown;
 
 use std::path::Path;
 
@@ -38,8 +42,9 @@ pub enum Format {
     /// OpenDocument Text (`.odt`).
     Odt,
     /// Converted with [pdf-inspector], which emits Markdown directly:
-    /// [`to_document`] is unsupported for PDFs. Scanned/image-only PDFs
-    /// (needing OCR) error as unsupported.
+    /// [`to_document`] is unsupported for PDFs. Scanned or image-only pages
+    /// need OCR, which anydoc does not do: the document errors with
+    /// [`ConvertError::NeedsOcr`] naming them.
     ///
     /// [pdf-inspector]: https://github.com/firecrawl/pdf-inspector
     Pdf,
@@ -51,8 +56,8 @@ pub enum Format {
     Rtf,
     /// EPUB 2 and 3 (`.epub`).
     Epub,
-    /// Excel workbooks in every container calamine reads: `.xlsx`, `.xlsm`,
-    /// `.xlsb`, and binary `.xls`.
+    /// Excel workbooks: `.xlsx`, `.xlsm`, binary `.xlsb`, and legacy
+    /// OLE-based `.xls`.
     Excel,
     /// OpenDocument Spreadsheet (`.ods`).
     Ods,
@@ -172,12 +177,7 @@ pub fn to_document_with_asset_policy(
 }
 
 /// Extract spreadsheet sheet provenance and embedded DrawingML assets without
-/// parsing cells or rendering tables and Markdown.
-///
-/// OOXML XLSX/XLSM packages are traversed through the same bounded package
-/// layer as full conversion. Binary XLS/XLSB return an explicit unsupported
-/// manifest because their drawing ownership is unavailable without the cell
-/// parser.
+/// parsing cells or rendering Markdown.
 pub fn extract_spreadsheet_assets(
     bytes: &[u8],
 ) -> Result<spreadsheet::SpreadsheetAssetManifest, ConvertError> {

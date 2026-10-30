@@ -48,17 +48,12 @@ pub fn parse_with_asset_policy(
     let assets = RefCell::new(AssetSink::with_policy(asset_policy));
     let ctx = Ctx::new(&styles, &pkg, &assets);
 
-    let mut source_units = Vec::new();
-    let blocks = if let Some(text) = body.find(ns::OFFICE, "text") {
-        parse_container(text, &ctx)?
+    let (blocks, source_units) = if let Some(text) = body.find(ns::OFFICE, "text") {
+        (parse_container(text, &ctx)?, Vec::new())
     } else if let Some(sheet) = body.find(ns::OFFICE, "spreadsheet") {
-        let (blocks, units) = table::parse_spreadsheet(sheet, &ctx)?;
-        source_units = units;
-        blocks
+        table::parse_spreadsheet(sheet, &ctx)?
     } else if let Some(pres) = body.find(ns::OFFICE, "presentation") {
-        let (blocks, units) = parse_presentation(pres, &ctx)?;
-        source_units = units;
-        blocks
+        parse_presentation(pres, &ctx)?
     } else {
         return Err(ConvertError::malformed_part(
             "content.xml",
@@ -88,8 +83,8 @@ fn parse_presentation(
     ctx: &Ctx,
 ) -> Result<(Vec<Block>, Vec<SourceUnit>), ConvertError> {
     let mut blocks = Vec::new();
-    let mut source_units = Vec::new();
-    for (page_index, page) in pres.find_all(ns::DRAW, "page").enumerate() {
+    let mut units = Vec::new();
+    for (index, page) in pres.find_all(ns::DRAW, "page").enumerate() {
         let start_block = blocks.len();
         let mut title = Vec::new();
         let mut body = Vec::new();
@@ -101,11 +96,11 @@ fn parse_presentation(
         if !notes.is_empty() {
             blocks.push(Block::BlockQuote(notes));
         }
-        source_units.push(SourceUnit {
+        units.push(SourceUnit {
             kind: SourceUnitKind::Slide,
-            ordinal: page_index + 1,
+            ordinal: index + 1,
             name: page.attr(ns::DRAW, "name").map(str::to_string),
-            status: if start_block == blocks.len() {
+            status: if blocks.len() == start_block {
                 SourceUnitStatus::Empty
             } else {
                 SourceUnitStatus::Parsed
@@ -115,7 +110,7 @@ fn parse_presentation(
             end_block: blocks.len(),
         });
     }
-    Ok((blocks, source_units))
+    Ok((blocks, units))
 }
 
 /// Walk a page's shapes in document order, recursing into `draw:g` groups.
@@ -150,6 +145,11 @@ fn walk_shapes(
                         inner.extend(parse_container(content, ctx)?);
                     } else if content.is(ns::TABLE, "table") {
                         inner.extend(table::parse_table(content, ctx)?);
+                    } else if content.is(ns::DRAW, "object")
+                        && let Some(tex) = text::formula_tex(ctx, content)?
+                    {
+                        inner.push(Block::Math(tex));
+                        break;
                     } else if content.is(ns::DRAW, "image") {
                         let mut out = Vec::new();
                         let mut boxes = Vec::new();
@@ -277,42 +277,38 @@ mod tests {
     }
 
     #[test]
-    fn heading_style_is_structural_but_nested_text_style_survives() {
+    fn styled_runs_stop_at_tables_and_work_inside_cells() {
         let content = r#"<office:document-content
             xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
-            xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
             xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
-            xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0">
+            xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+            xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
             <office:automatic-styles>
-                <style:style style:name="Heading" style:family="paragraph">
-                    <style:text-properties fo:font-weight="bold"/>
-                </style:style>
-                <style:style style:name="Strong" style:family="text">
-                    <style:text-properties fo:font-weight="bold"/>
-                </style:style>
+              <style:style style:name="Source_20_Code" style:family="paragraph"/>
             </office:automatic-styles>
             <office:body><office:text>
-                <text:h text:outline-level="1" text:style-name="Heading">plain <text:span text:style-name="Strong">explicit</text:span></text:h>
+              <text:p text:style-name="Source_20_Code">before table</text:p>
+              <table:table><table:table-row><table:table-cell>
+                <text:p text:style-name="Source_20_Code">inside cell</text:p>
+              </table:table-cell></table:table-row></table:table>
+              <text:p>after table</text:p>
             </office:text></office:body>
-        </office:document-content>"#;
+            </office:document-content>"#;
         let doc = parse(&odt_with_content(content)).unwrap();
-        let Some(Block::Heading { content, .. }) = doc.blocks.first() else {
-            panic!("expected heading: {:?}", doc.blocks)
+        let [Block::CodeBlock { text: before, .. }, Block::Table(table), Block::Paragraph(after)] =
+            &doc.blocks[..]
+        else {
+            panic!("unexpected block order: {:?}", doc.blocks);
         };
-        let styles: Vec<crate::model::Style> = content
-            .iter()
-            .filter_map(|inline| match inline {
-                Inline::Text { style, .. } => Some(*style),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            styles,
-            vec![
-                crate::model::Style::PLAIN,
-                crate::model::Style { bold: true, ..crate::model::Style::PLAIN },
-            ]
-        );
+        assert_eq!(before, "before table");
+        assert_eq!(crate::model::inlines_to_plain_text(after), "after table");
+        let crate::model::CellSlot::Origin(cell) = &table.grid[0][0] else {
+            panic!("expected an origin cell")
+        };
+        let [Block::CodeBlock { text: inside, .. }] = &cell.blocks[..] else {
+            panic!("unexpected cell blocks: {:?}", cell.blocks)
+        };
+        assert_eq!(inside, "inside cell");
     }
 
     #[test]
@@ -326,5 +322,33 @@ mod tests {
             matches!(err, ConvertError::ResourceLimit { limit: "max_xml_depth", .. }),
             "encryption probing must not swallow fatal errors, got: {err}"
         );
+    }
+
+    #[test]
+    fn form_checkboxes_anchored_in_a_cell_follow_its_content() {
+        let content = r#"<office:document-content
+            xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+            xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+            xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+            xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+            xmlns:form="urn:oasis:names:tc:opendocument:xmlns:form:1.0"
+            xmlns:xml="http://www.w3.org/XML/1998/namespace">
+            <office:body><office:spreadsheet><table:table table:name="S">
+            <office:forms><form:form>
+              <form:checkbox xml:id="c1" form:label="Roof" form:current-state="checked"/>
+              <form:checkbox xml:id="c2" form:label="Wall"/>
+              <form:checkbox xml:id="c3" form:current-state="unknown"/>
+            </form:form></office:forms>
+            <table:table-row>
+              <table:table-cell><text:p>14</text:p></table:table-cell>
+              <table:table-cell><text:p>L/R</text:p><draw:control draw:control="c1"/></table:table-cell>
+              <table:table-cell><draw:control draw:control="c2"/><draw:control draw:control="c3"/></table:table-cell>
+            </table:table-row>
+            </table:table></office:spreadsheet></office:body>
+            </office:document-content>"#;
+        let doc = parse(&odt_with_content(content)).unwrap();
+        let md = crate::render::markdown::document_to_markdown(&doc);
+        assert!(md.contains("kind=sheet ordinal=1 status=parsed name=S"), "{md}");
+        assert!(md.contains("| 14 | L/R [x] Roof | [ ] Wall |"), "{md}");
     }
 }

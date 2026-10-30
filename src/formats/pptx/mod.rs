@@ -16,9 +16,11 @@ use crate::package::relationships::{
 use crate::package::xml::{Element, ns, parse_xml};
 use crate::package::{Package, archive::probe_ole, path};
 use crate::shared::assets::AssetSink;
+use crate::shared::delta::rebase_emphasis;
 use crate::shared::fields::classify_rel_target;
 use crate::shared::header::resolve_header_rows;
 use crate::shared::list::{ListEntry, ListKey, MarkerKind, flush_list};
+use crate::shared::math::{math_lines, omath_para_to_tex};
 use crate::shared::text::clean_text;
 use cascade::{Bullet, LevelStyle, Placeholder, TextProps, TitleClass};
 use std::cell::{Cell as StdCell, RefCell};
@@ -34,7 +36,7 @@ const SLIDE_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/r
 
 /// Namespaces whose markup this frontend understands; `mc:Choice` branches
 /// requiring anything else fall back to `mc:Fallback`.
-const SUPPORTED_NS: &[&str] = &[ns::P, ns::A, ns::R, ns::MC];
+const SUPPORTED_NS: &[&str] = &[ns::P, ns::A, ns::R, ns::MC, ns::A14];
 
 struct LayoutInfo {
     placeholders: Vec<Placeholder>,
@@ -46,11 +48,6 @@ struct MasterInfo {
     body: LevelStyle,
     other: LevelStyle,
     placeholders: Vec<Placeholder>,
-}
-
-#[cfg(test)]
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
-    parse_with_asset_policy(bytes, crate::AssetRetentionPolicy::default())
 }
 
 pub fn parse_with_asset_policy(
@@ -131,15 +128,7 @@ pub fn parse_with_asset_policy(
             None => {
                 log::warn!("skipping unusable slide {slide_path}");
                 failed += 1;
-                source_units.push(SourceUnit {
-                    kind: SourceUnitKind::Slide,
-                    ordinal: slide_index + 1,
-                    name: None,
-                    status: SourceUnitStatus::Skipped,
-                    reason: Some("missing_or_unreadable_part".into()),
-                    start_block,
-                    end_block: blocks.len(),
-                });
+                source_units.push(skipped_slide(slide_index, start_block, "slide_unreadable"));
                 continue;
             }
         };
@@ -150,15 +139,7 @@ pub fn parse_with_asset_policy(
         else {
             log::warn!("skipping slide {slide_path}: no shape tree");
             failed += 1;
-            source_units.push(SourceUnit {
-                kind: SourceUnitKind::Slide,
-                ordinal: slide_index + 1,
-                name: None,
-                status: SourceUnitStatus::Skipped,
-                reason: Some("missing_shape_tree".into()),
-                start_block,
-                end_block: blocks.len(),
-            });
+            source_units.push(skipped_slide(slide_index, start_block, "slide_shape_tree_missing"));
             continue;
         };
         let slide_rels = &all_rels[slide_index];
@@ -237,7 +218,7 @@ pub fn parse_with_asset_policy(
             kind: SourceUnitKind::Slide,
             ordinal: slide_index + 1,
             name: None,
-            status: if start_block == blocks.len() {
+            status: if blocks.len() == start_block {
                 SourceUnitStatus::Empty
             } else {
                 SourceUnitStatus::Parsed
@@ -253,6 +234,18 @@ pub fn parse_with_asset_policy(
 
     let assets = std::mem::take(&mut assets.borrow_mut().assets);
     Ok(Document { blocks, source_units, notes: Vec::new(), assets })
+}
+
+fn skipped_slide(index: usize, at: usize, reason: &str) -> SourceUnit {
+    SourceUnit {
+        kind: SourceUnitKind::Slide,
+        ordinal: index + 1,
+        name: None,
+        status: SourceUnitStatus::Skipped,
+        reason: Some(reason.to_string()),
+        start_block: at,
+        end_block: at,
+    }
 }
 
 fn rel_target_of_type(rels: &Relationships, base: &str, rel_type: &str) -> Option<String> {
@@ -437,28 +430,37 @@ fn parse_shape(sp: &Element, ctx: &SlideCtx, blocks: &mut Vec<Block>) -> Result<
     };
     // Titles get heading semantics but keep their shape-order position.
     if ph.as_ref().is_some_and(|p| cascade::title_class(&p.ph_type) == TitleClass::Title) {
-        push_title_heading(tx, ctx, blocks)?;
+        push_title_heading(tx, ctx, ph.as_ref(), blocks)?;
     } else {
         parse_text_body(tx, ctx, ph.as_ref(), blocks)?;
     }
     Ok(())
 }
 
-/// Collapse a title placeholder's paragraphs into one slide heading.
+/// Collapse a title placeholder's paragraphs into one slide heading. Runs
+/// resolve through the full cascade like body text.
 fn push_title_heading(
     tx: &Element,
     ctx: &SlideCtx,
+    ph: Option<&PhInfo>,
     blocks: &mut Vec<Block>,
 ) -> Result<(), ConvertError> {
+    let shape_styles = cascade::parse_level_styles(tx.find(ns::A, "lstStyle"));
     let mut inlines: Vec<Inline> = Vec::new();
     for p in tx.find_all(ns::A, "p") {
-        // Placeholder/master typography belongs to the heading block. Run
-        // properties are absolute, so applying them over PLAIN retains only
-        // source-explicit inline emphasis.
-        let para = parse_para_inlines(p, ctx, Style::PLAIN);
+        let ppr = p.find(ns::A, "pPr");
+        let lvl: usize =
+            ppr.and_then(|pr| pr.attr(ns::A, "lvl")).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let mut props = ctx.base_props(ph, &shape_styles, lvl);
+        if let Some(ppr) = ppr {
+            props = props.merge(cascade::paragraph_props(ppr));
+        }
+        let base = props.delta.resolve();
+        let mut para = parse_para_inlines(p, ctx, base);
         if inlines_are_empty(&para) {
             continue;
         }
+        rebase_emphasis(&mut para, base);
         if !inlines.is_empty() {
             inlines.push(Inline::LineBreak);
         }
@@ -531,7 +533,10 @@ fn parse_text_body(
             }),
             Bullet::None | Bullet::Inherit => {
                 flush_list(blocks, &mut list_run);
-                blocks.push(Block::Paragraph(inlines));
+                match math_lines(&inlines) {
+                    Some(lines) => blocks.extend(lines.into_iter().map(Block::Math)),
+                    None => blocks.push(Block::Paragraph(inlines)),
+                }
             }
         }
     }
@@ -542,6 +547,16 @@ fn parse_text_body(
 fn parse_para_inlines(p: &Element, ctx: &SlideCtx, base: Style) -> Vec<Inline> {
     let mut out: Vec<Inline> = Vec::new();
     for child in p.child_elems() {
+        if child.is(ns::A14, "m") {
+            let para = child.find(ns::M, "oMathPara").unwrap_or(child);
+            for (i, tex) in omath_para_to_tex(para).into_iter().enumerate() {
+                if i > 0 {
+                    out.push(Inline::LineBreak);
+                }
+                out.push(Inline::Math(tex));
+            }
+            continue;
+        }
         if child.ns.as_deref().is_none_or(|n| n != ns::A) {
             continue;
         }
@@ -666,64 +681,4 @@ fn parse_table(tbl: &Element, ctx: &SlideCtx, blocks: &mut Vec<Block>) -> Result
     table.header_rows = resolve_header_rows(&table, header_rows);
     blocks.push(Block::Table(table));
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::{Cursor, Write};
-
-    fn pptx(parts: &[(&str, &str)]) -> Vec<u8> {
-        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let options = zip::write::SimpleFileOptions::default();
-        for (name, body) in parts {
-            writer.start_file(*name, options).unwrap();
-            writer.write_all(body.as_bytes()).unwrap();
-        }
-        writer.finish().unwrap().into_inner()
-    }
-
-    #[test]
-    fn title_defaults_are_structural_but_direct_run_emphasis_survives() {
-        let presentation = r#"<p:presentation
-            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
-            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-            <p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst>
-        </p:presentation>"#;
-        let relationships = r#"<Relationships
-            xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-            <Relationship Id="rId1"
-                Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
-                Target="slides/slide1.xml"/>
-        </Relationships>"#;
-        let slide = r#"<p:sld
-            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
-            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
-            <p:cSld><p:spTree><p:sp>
-                <p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
-                <p:txBody><a:bodyPr/><a:lstStyle/><a:p>
-                    <a:pPr><a:defRPr b="1"/></a:pPr>
-                    <a:r><a:t>plain</a:t></a:r>
-                    <a:r><a:rPr b="1"/><a:t> explicit</a:t></a:r>
-                </a:p></p:txBody>
-            </p:sp></p:spTree></p:cSld>
-        </p:sld>"#;
-        let doc = parse(&pptx(&[
-            ("ppt/presentation.xml", presentation),
-            ("ppt/_rels/presentation.xml.rels", relationships),
-            ("ppt/slides/slide1.xml", slide),
-        ]))
-        .unwrap();
-        let Some(Block::Heading { content, .. }) = doc.blocks.first() else {
-            panic!("expected heading: {:?}", doc.blocks)
-        };
-        let styles: Vec<Style> = content
-            .iter()
-            .filter_map(|inline| match inline {
-                Inline::Text { style, .. } => Some(*style),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(styles, vec![Style::PLAIN, Style { bold: true, ..Style::PLAIN }]);
-    }
 }

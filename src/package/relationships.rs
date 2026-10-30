@@ -38,9 +38,9 @@ pub struct Relationship {
 #[derive(Debug, Default)]
 pub struct Relationships(HashMap<String, Relationship>);
 
-/// Outcome of reading an optional relationships part. Most format frontends
-/// treat absence and corruption alike, but compact provenance surfaces need to
-/// distinguish "there were no relationships" from "relationships were lost".
+/// Outcome of reading an optional relationships part. Most frontends treat
+/// absence and corruption alike, while provenance surfaces need to distinguish
+/// "no relationships" from "relationships were lost".
 pub(crate) enum RelationshipPart {
     Absent,
     Unreadable,
@@ -84,8 +84,7 @@ pub fn read_rels(pkg: &mut Package, part: &str) -> Result<Relationships, Convert
 }
 
 /// Read an optional relationships part without erasing whether a present part
-/// was unreadable. Resource-limit errors still propagate from the package
-/// layer; malformed optional XML has already been logged there.
+/// was unreadable. Resource-limit errors still propagate.
 pub(crate) fn read_relationship_part(
     pkg: &mut Package,
     part: &str,

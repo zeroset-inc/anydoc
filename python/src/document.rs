@@ -27,8 +27,6 @@ pub struct Document {
     assets: Py<PyList>,
 }
 
-/// Ordered rendered parts and source-unit provenance without the document
-/// model that produced them.
 #[pyclass(frozen, get_all, module = "anydoc")]
 pub struct RenderedParts {
     /// list[RenderedPart]
@@ -37,18 +35,13 @@ pub struct RenderedParts {
     source_units: Py<PyList>,
 }
 
-/// Markdown and provenance for one ordered range of a document.
 #[pyclass(frozen, get_all, module = "anydoc")]
 pub struct RenderedPart {
-    /// Markdown for this range, without source-unit boundary comments.
     markdown: String,
-    /// Index into `Document.source_units`, or None for unowned content.
     source_unit_index: Option<usize>,
-    /// Half-open range into `Document.blocks`.
     start_block: usize,
     end_block: usize,
-    /// Distinct embedded asset ids referenced below this range, in first-use
-    /// order. Unreferenced assets are assigned to a trailing unowned part.
+    /// Distinct embedded asset ids referenced by this range.
     asset_ids: Py<PyList>,
 }
 
@@ -62,18 +55,12 @@ fn rendered_part(py: Python<'_>, part: anydoc::RenderedPart) -> PyResult<Rendere
     })
 }
 
-/// A source-defined unit mapped to a half-open range of top-level blocks.
 #[pyclass(frozen, get_all, module = "anydoc")]
 pub struct SourceUnit {
-    /// slide or sheet.
     kind: &'static str,
-    /// 1-based source position.
     ordinal: usize,
-    /// Source-defined name, when present.
     name: Option<String>,
-    /// parsed, empty, or skipped.
     status: &'static str,
-    /// Stable machine-readable explanation when skipped.
     reason: Option<String>,
     start_block: usize,
     end_block: usize,
@@ -100,7 +87,8 @@ fn source_unit(unit: model::SourceUnit) -> SourceUnit {
 
 #[pyclass(frozen, get_all, module = "anydoc")]
 pub struct Block {
-    /// heading, paragraph, list, table, block_quote, code_block, or rule.
+    /// heading, paragraph, list, table, block_quote, code_block, rule, or
+    /// math.
     kind: &'static str,
     /// heading: 1-6.
     level: Option<u8>,
@@ -114,7 +102,7 @@ pub struct Block {
     blocks: Option<Py<PyList>>,
     /// code_block.
     lang: Option<String>,
-    /// code_block.
+    /// code_block, math (LaTeX source without delimiters).
     text: Option<String>,
 }
 
@@ -158,15 +146,16 @@ fn block(py: Python<'_>, block: model::Block) -> PyResult<Block> {
             Block { lang, text: Some(text), ..Block::of("code_block") }
         }
         model::Block::Rule => Block::of("rule"),
+        model::Block::Math(tex) => Block { text: Some(tex), ..Block::of("math") },
     })
 }
 
 #[pyclass(frozen, get_all, module = "anydoc")]
 pub struct Inline {
     /// text, link, image, anchor (a zero-width marker for an internal link
-    /// target at this position), note_ref, or line_break.
+    /// target at this position), note_ref, line_break, or math.
     kind: &'static str,
-    /// text.
+    /// text; math (LaTeX source without delimiters).
     text: Option<String>,
     /// text.
     style: Option<Py<Style>>,
@@ -182,6 +171,8 @@ pub struct Inline {
     anchor: Option<String>,
     /// note_ref: the id of the note in `Document.notes`.
     note_id: Option<String>,
+    /// checkbox: its state.
+    checked: Option<bool>,
 }
 
 impl Inline {
@@ -196,6 +187,7 @@ impl Inline {
             source: None,
             anchor: None,
             note_id: None,
+            checked: None,
         }
     }
 }
@@ -220,6 +212,10 @@ fn inline(py: Python<'_>, inline: model::Inline) -> PyResult<Inline> {
         model::Inline::Anchor(id) => Inline { anchor: Some(id), ..Inline::of("anchor") },
         model::Inline::NoteRef(id) => Inline { note_id: Some(id), ..Inline::of("note_ref") },
         model::Inline::LineBreak => Inline::of("line_break"),
+        model::Inline::Math(tex) => Inline { text: Some(tex), ..Inline::of("math") },
+        model::Inline::Checkbox(checked) => {
+            Inline { checked: Some(checked), ..Inline::of("checkbox") }
+        }
     })
 }
 
@@ -316,8 +312,6 @@ fn list(py: Python<'_>, list: model::List) -> PyResult<List> {
 pub struct ListItem {
     /// list[Block]
     blocks: Py<PyList>,
-    /// Task-list state, when the item carries a checkbox.
-    checked: Option<bool>,
     /// Literal marker text that overrides the list marker when the source
     /// number text cannot be reproduced from the marker and position alone
     /// (composite number text such as `1-a)`).
@@ -325,11 +319,7 @@ pub struct ListItem {
 }
 
 fn list_item(py: Python<'_>, item: model::ListItem) -> PyResult<ListItem> {
-    Ok(ListItem {
-        blocks: blocks(py, item.blocks)?,
-        checked: item.checked,
-        marker_label: item.marker_label,
-    })
+    Ok(ListItem { blocks: blocks(py, item.blocks)?, marker_label: item.marker_label })
 }
 
 /// Canonical table grid: every logical grid position appears exactly once.
@@ -433,16 +423,25 @@ pub struct Asset {
     /// Package part or stream the asset came from, for provenance.
     origin_part: String,
     byte_len: usize,
+    image_width: Option<usize>,
+    image_height: Option<usize>,
+    decode_width: Option<usize>,
+    decode_height: Option<usize>,
+    decoded_pixels: Option<u64>,
     data: Option<Py<PyBytes>>,
-    /// max_unique_assets, max_total_bytes, max_asset_bytes, or None.
+    /// Stable snake-case retention-limit reason, or None.
     omission_reason: Option<&'static str>,
 }
 
 fn omission_reason(reason: model::AssetOmissionReason) -> &'static str {
     match reason {
+        model::AssetOmissionReason::MaxAssetOccurrences => "max_asset_occurrences",
         model::AssetOmissionReason::MaxUniqueAssets => "max_unique_assets",
         model::AssetOmissionReason::MaxTotalBytes => "max_total_bytes",
         model::AssetOmissionReason::MaxAssetBytes => "max_asset_bytes",
+        model::AssetOmissionReason::MaxDecodedPixels => "max_decoded_pixels",
+        model::AssetOmissionReason::MaxImagePixels => "max_image_pixels",
+        model::AssetOmissionReason::MinImageDimension => "min_image_dimension",
     }
 }
 
@@ -452,6 +451,11 @@ pub(crate) fn asset(py: Python<'_>, asset: model::Asset) -> PyResult<Asset> {
         media_type: asset.media_type,
         origin_part: asset.origin_part,
         byte_len: asset.byte_len,
+        image_width: asset.image_width,
+        image_height: asset.image_height,
+        decode_width: asset.decode_width,
+        decode_height: asset.decode_height,
+        decoded_pixels: asset.decoded_pixels,
         data: asset.omission_reason.is_none().then(|| PyBytes::new(py, &asset.bytes).unbind()),
         omission_reason: asset.omission_reason.map(omission_reason),
     })

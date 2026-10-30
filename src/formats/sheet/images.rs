@@ -35,6 +35,7 @@ pub(super) struct SheetImage {
 
 impl SheetImage {
     pub fn into_inline(self) -> Inline {
+        let _ = self.anchor;
         Inline::Image { alt: self.alt, source: self.source }
     }
 }

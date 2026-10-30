@@ -51,7 +51,6 @@ pub struct RenderedPart {
     /// Exclusive top-level block bound covered by this part.
     pub end_block: usize,
     /// Distinct embedded assets referenced below this range, in first-use order.
-    /// Assets with no inline reference are assigned to a trailing unowned part.
     pub asset_ids: Vec<AssetId>,
 }
 
@@ -80,10 +79,6 @@ pub fn render_document(doc: &Document) -> RenderedDocument {
 }
 
 /// Render only the ordered Markdown/provenance parts of a parsed document.
-///
-/// Unlike [`render_document`], this does not build the complete Markdown
-/// string. Note definitions and assets without source-unit ownership remain
-/// in the trailing unowned part.
 pub fn render_document_parts(doc: &Document) -> Vec<RenderedPart> {
     let rc = Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc) };
     render_document_parts_with_context(doc, &rc)
@@ -105,8 +100,8 @@ fn valid_source_units(doc: &Document) -> Vec<(usize, &crate::model::SourceUnit)>
 }
 
 fn render_document_markdown(doc: &Document, rc: &Ctx) -> String {
-    let mut parts = Vec::new();
     let units = valid_source_units(doc);
+    let mut parts = Vec::new();
     for block_index in 0..=doc.blocks.len() {
         for unit in units
             .iter()
@@ -135,64 +130,34 @@ fn render_document_markdown(doc: &Document, rc: &Ctx) -> String {
 }
 
 fn render_note_definitions(doc: &Document, rc: &Ctx) -> Vec<String> {
-    rendered_canonical_notes(doc, rc).into_iter().filter_map(|rendered| rendered.markdown).collect()
-}
-
-struct CanonicalNoteRender<'a> {
-    note: &'a Note,
-    markdown: Option<String>,
-}
-
-/// Select the first structurally non-blank note for each id in storage order.
-fn canonical_notes(doc: &Document) -> Vec<&Note> {
-    let mut ids = HashSet::new();
-    let mut notes = Vec::new();
-    for note in &doc.notes {
-        if note.blocks.iter().all(block_is_blank) {
-            continue;
-        }
-        if !ids.insert(note.id.as_str()) {
-            continue;
-        }
-        notes.push(note);
-    }
-    notes
-}
-
-fn rendered_canonical_notes<'a>(doc: &'a Document, rc: &Ctx) -> Vec<CanonicalNoteRender<'a>> {
-    let mut ordered: Vec<(&Note, usize)> = canonical_notes(doc)
-        .into_iter()
-        .map(|note| {
-            let num = *rc.nums.get(&note.id).expect("every canonical note was numbered");
-            (note, num)
-        })
-        .collect();
+    let mut parts = Vec::new();
+    let mut rendered_defs: HashSet<usize> = HashSet::new();
+    let mut ordered: Vec<(&Note, usize)> =
+        doc.notes.iter().filter_map(|n| rc.nums.get(&n.id).map(|&num| (n, num))).collect();
     ordered.sort_by_key(|(_, num)| *num);
-    ordered
-        .into_iter()
-        .map(|(note, num)| CanonicalNoteRender {
-            note,
-            markdown: render_note_definition(note, num, rc),
-        })
-        .collect()
-}
-
-fn render_note_definition(note: &Note, num: usize, rc: &Ctx) -> Option<String> {
-    let body = render_blocks(&note.blocks, rc);
-    if body.is_empty() {
-        return None;
-    }
-    let mut lines = body.lines();
-    let first = lines.next().unwrap_or("");
-    let mut s = format!("[^{num}]: {first}");
-    for line in lines {
-        s.push('\n');
-        if !line.is_empty() {
-            s.push_str("    ");
-            s.push_str(line);
+    for (note, num) in ordered {
+        let body = render_blocks(&note.blocks, rc);
+        if body.is_empty() {
+            continue;
         }
+        // The first non-empty definition for a duplicate id wins.
+        if !rendered_defs.insert(num) {
+            log::debug!("duplicate note id {:?} dropped from output", note.id);
+            continue;
+        }
+        let mut lines = body.lines();
+        let first = lines.next().unwrap_or("");
+        let mut s = format!("[^{num}]: {first}");
+        for line in lines {
+            s.push('\n');
+            if !line.is_empty() {
+                s.push_str("    ");
+                s.push_str(line);
+            }
+        }
+        parts.push(s);
     }
-    Some(s)
+    parts
 }
 
 fn finish_markdown(mut out: String) -> String {
@@ -205,87 +170,61 @@ fn finish_markdown(mut out: String) -> String {
 fn render_document_parts_with_context(doc: &Document, rc: &Ctx) -> Vec<RenderedPart> {
     let units = valid_source_units(doc);
     let mut parts = Vec::new();
-    let mut referenced_assets = HashSet::new();
+    let mut all_seen = HashSet::new();
     let mut cursor = 0;
-
-    if units.is_empty() {
-        parts.push(render_part(doc, rc, None, 0, doc.blocks.len(), &mut referenced_assets));
-    } else {
-        for (source_unit_index, unit) in units {
-            if cursor < unit.start_block {
-                parts.push(render_part(
-                    doc,
-                    rc,
-                    None,
-                    cursor,
-                    unit.start_block,
-                    &mut referenced_assets,
-                ));
-            }
-            parts.push(render_part(
-                doc,
-                rc,
-                Some(source_unit_index),
-                unit.start_block,
-                unit.end_block,
-                &mut referenced_assets,
-            ));
-            cursor = unit.end_block;
+    for (unit_index, unit) in units {
+        if cursor < unit.start_block {
+            parts.push(render_part(doc, rc, None, cursor, unit.start_block, &mut all_seen));
         }
-        if cursor < doc.blocks.len() {
-            parts.push(render_part(
-                doc,
-                rc,
-                None,
-                cursor,
-                doc.blocks.len(),
-                &mut referenced_assets,
-            ));
-        }
+        parts.push(render_part(
+            doc,
+            rc,
+            Some(unit_index),
+            unit.start_block,
+            unit.end_block,
+            &mut all_seen,
+        ));
+        cursor = unit.end_block;
+    }
+    if cursor < doc.blocks.len() || parts.is_empty() {
+        parts.push(render_part(doc, rc, None, cursor, doc.blocks.len(), &mut all_seen));
     }
 
-    let rendered_notes = rendered_canonical_notes(doc, rc);
-    let note_markdown = rendered_notes
-        .iter()
-        .filter_map(|rendered| rendered.markdown.as_deref())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let note_asset_ids = collect_asset_ids_from_notes(
-        rendered_notes.iter().map(|rendered| rendered.note),
-        &mut referenced_assets,
-    );
-    // Canonical note assets were retained above, including notes whose image
-    // has no renderable alt text. Mark every note asset seen afterward so
-    // assets owned only by deliberately dropped duplicates do not reappear as
-    // unreferenced package assets.
+    let note_markdown = render_note_definitions(doc, rc).join("\n\n");
+    let mut trailing_assets = Vec::new();
     for note in &doc.notes {
-        walk_asset_ids(&note.blocks, &mut |id| {
-            referenced_assets.insert(id);
-        });
+        collect_asset_ids(&note.blocks, &mut all_seen, &mut trailing_assets);
     }
-    let unreferenced_asset_ids: Vec<AssetId> = doc
-        .assets
-        .iter()
-        .map(|asset| asset.id)
-        .filter(|id| !referenced_assets.contains(id))
-        .collect();
-
-    if !note_markdown.is_empty() || !note_asset_ids.is_empty() || !unreferenced_asset_ids.is_empty()
-    {
-        let part = trailing_unowned_part(&mut parts, doc.blocks.len());
+    for asset in &doc.assets {
+        if all_seen.insert(asset.id) {
+            trailing_assets.push(asset.id);
+        }
+    }
+    if !note_markdown.is_empty() || !trailing_assets.is_empty() {
+        if !parts.last().is_some_and(|part| {
+            part.source_unit_index.is_none() && part.end_block == doc.blocks.len()
+        }) {
+            parts.push(RenderedPart {
+                markdown: String::new(),
+                source_unit_index: None,
+                start_block: doc.blocks.len(),
+                end_block: doc.blocks.len(),
+                asset_ids: Vec::new(),
+            });
+        }
+        let part = parts.last_mut().expect("trailing part exists");
         if !note_markdown.is_empty() {
             if !part.markdown.is_empty() {
                 part.markdown.push_str("\n\n");
             }
             part.markdown.push_str(&note_markdown);
         }
-        for id in note_asset_ids.into_iter().chain(unreferenced_asset_ids) {
+        for id in trailing_assets {
             if !part.asset_ids.contains(&id) {
                 part.asset_ids.push(id);
             }
         }
     }
-
     for part in &mut parts {
         part.markdown = finish_markdown(std::mem::take(&mut part.markdown));
     }
@@ -298,10 +237,11 @@ fn render_part(
     source_unit_index: Option<usize>,
     start_block: usize,
     end_block: usize,
-    referenced_assets: &mut HashSet<AssetId>,
+    all_seen: &mut HashSet<AssetId>,
 ) -> RenderedPart {
     let blocks = &doc.blocks[start_block..end_block];
-    let asset_ids = collect_asset_ids(blocks, referenced_assets);
+    let mut asset_ids = Vec::new();
+    collect_asset_ids(blocks, all_seen, &mut asset_ids);
     RenderedPart {
         markdown: render_blocks(blocks, rc),
         source_unit_index,
@@ -311,89 +251,49 @@ fn render_part(
     }
 }
 
-fn trailing_unowned_part(parts: &mut Vec<RenderedPart>, block_count: usize) -> &mut RenderedPart {
-    let has_trailing_unowned = parts
-        .last()
-        .is_some_and(|part| part.source_unit_index.is_none() && part.end_block == block_count);
-    if !has_trailing_unowned {
-        parts.push(RenderedPart {
-            markdown: String::new(),
-            source_unit_index: None,
-            start_block: block_count,
-            end_block: block_count,
-            asset_ids: Vec::new(),
-        });
-    }
-    parts.last_mut().expect("a trailing part was retained or inserted")
-}
-
-fn collect_asset_ids(blocks: &[Block], all_seen: &mut HashSet<AssetId>) -> Vec<AssetId> {
-    let mut part_seen = HashSet::new();
-    let mut ids = Vec::new();
-    walk_asset_ids(blocks, &mut |id| {
-        all_seen.insert(id);
-        if part_seen.insert(id) {
-            ids.push(id);
-        }
-    });
-    ids
-}
-
-fn collect_asset_ids_from_notes<'a>(
-    notes: impl IntoIterator<Item = &'a Note>,
-    all_seen: &mut HashSet<AssetId>,
-) -> Vec<AssetId> {
-    let mut note_seen = HashSet::new();
-    let mut ids = Vec::new();
-    for note in notes {
-        walk_asset_ids(&note.blocks, &mut |id| {
-            all_seen.insert(id);
-            if note_seen.insert(id) {
-                ids.push(id);
-            }
-        });
-    }
-    ids
-}
-
-fn walk_asset_ids(blocks: &[Block], found: &mut impl FnMut(AssetId)) {
+fn collect_asset_ids(blocks: &[Block], all_seen: &mut HashSet<AssetId>, output: &mut Vec<AssetId>) {
     fn walk_inlines(inlines: &[Inline], found: &mut impl FnMut(AssetId)) {
         for inline in inlines {
             match inline {
                 Inline::Link { content, .. } => walk_inlines(content, found),
                 Inline::Image { source: crate::model::ImageSource::Asset(id), .. } => found(*id),
-                Inline::Text { .. }
-                | Inline::Image { .. }
-                | Inline::Anchor(_)
-                | Inline::NoteRef(_)
-                | Inline::LineBreak => {}
+                _ => {}
             }
         }
     }
-
-    for block in blocks {
-        match block {
-            Block::Heading { content, .. } | Block::Paragraph(content) => {
-                walk_inlines(content, found)
-            }
-            Block::List(list) => {
-                for item in &list.items {
-                    walk_asset_ids(&item.blocks, found);
+    let mut part_seen = HashSet::new();
+    let mut found = |id| {
+        all_seen.insert(id);
+        if part_seen.insert(id) {
+            output.push(id);
+        }
+    };
+    fn walk_blocks(blocks: &[Block], found: &mut impl FnMut(AssetId)) {
+        for block in blocks {
+            match block {
+                Block::Heading { content, .. } | Block::Paragraph(content) => {
+                    walk_inlines(content, found)
                 }
-            }
-            Block::Table(table) => {
-                for row in &table.grid {
-                    for slot in row {
-                        if let crate::model::CellSlot::Origin(cell) = slot {
-                            walk_asset_ids(&cell.blocks, found);
+                Block::List(list) => {
+                    for item in &list.items {
+                        walk_blocks(&item.blocks, found);
+                    }
+                }
+                Block::Table(table) => {
+                    for row in &table.grid {
+                        for slot in row {
+                            if let crate::model::CellSlot::Origin(cell) = slot {
+                                walk_blocks(&cell.blocks, found);
+                            }
                         }
                     }
                 }
+                Block::BlockQuote(nested) => walk_blocks(nested, found),
+                Block::CodeBlock { .. } | Block::Rule | Block::Math(_) => {}
             }
-            Block::BlockQuote(blocks) => walk_asset_ids(blocks, found),
-            Block::CodeBlock { .. } | Block::Rule => {}
         }
     }
+    walk_blocks(blocks, &mut found);
 }
 
 fn render_source_unit(unit: &crate::model::SourceUnit, start: bool) -> String {
@@ -425,8 +325,6 @@ fn render_source_unit(unit: &crate::model::SourceUnit, start: bool) -> String {
     marker
 }
 
-/// Percent-encode source names so untrusted text cannot close the HTML
-/// comment or introduce ambiguous whitespace-delimited fields.
 fn percent_encode(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = String::with_capacity(value.len());
@@ -443,16 +341,19 @@ fn percent_encode(value: &str) -> String {
 }
 
 /// Number notes in first-reference order; unreferenced notes follow at the
-/// end. The first structurally non-blank note wins a duplicated id.
+/// end. The first note wins a duplicated id.
 fn number_notes(doc: &Document) -> NoteNumbers {
-    let canonical = canonical_notes(doc);
-    let valid: HashMap<&str, &Note> =
-        canonical.iter().map(|note| (note.id.as_str(), *note)).collect();
+    let mut valid: HashMap<&str, &Note> = HashMap::new();
+    for note in &doc.notes {
+        if !note.blocks.iter().all(block_is_blank) {
+            valid.entry(note.id.as_str()).or_insert(note);
+        }
+    }
     let mut order: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
     collect_note_refs(&doc.blocks, &valid, &mut order, &mut seen);
-    for note in canonical {
-        if seen.insert(note.id.clone()) {
+    for note in &doc.notes {
+        if valid.contains_key(note.id.as_str()) && seen.insert(note.id.clone()) {
             order.push(note.id.clone());
         }
     }
@@ -513,7 +414,7 @@ fn collect_note_refs(
                 }
             }
             Block::BlockQuote(blocks) => collect_note_refs(blocks, valid, order, seen),
-            Block::CodeBlock { .. } | Block::Rule => {}
+            Block::CodeBlock { .. } | Block::Rule | Block::Math(_) => {}
         }
     }
 }
@@ -565,6 +466,24 @@ fn render_block(block: &Block, rc: &Ctx) -> Option<String> {
             Some(format!("{fence}{lang}\n{body}\n{fence}"))
         }
         Block::Rule => Some("---".to_string()),
+        Block::Math(tex) => {
+            let tex = tex.trim();
+            if tex.is_empty() {
+                return None;
+            }
+            // A bare `$` is never valid inside math; escaped, it cannot
+            // close the block early.
+            let mut source = String::with_capacity(tex.len());
+            let mut backslashes = 0;
+            for c in tex.chars() {
+                if c == '$' && backslashes % 2 == 0 {
+                    source.push('\\');
+                }
+                source.push(c);
+                backslashes = if c == '\\' { backslashes + 1 } else { 0 };
+            }
+            Some(format!("$$\n{source}\n$$"))
+        }
     }
 }
 
@@ -587,11 +506,6 @@ fn render_list(list: &List, rc: &Ctx) -> Option<String> {
             (None, MarkerKind::Decimal) => format!("{}. ", list.start.saturating_add(i as u64)),
             (None, kind) => format!("- {} ", kind.label(list.start.saturating_add(i as u64))),
         };
-        let checkbox = match item.checked {
-            Some(true) => "[x] ",
-            Some(false) => "[ ] ",
-            None => "",
-        };
         let body = render_blocks(&item.blocks, rc);
         if item.blocks.len() > 1 {
             loose = true;
@@ -599,7 +513,7 @@ fn render_list(list: &List, rc: &Ctx) -> Option<String> {
         let indent = " ".repeat(marker.chars().count());
         let mut lines = body.lines();
         let first = lines.next().unwrap_or("");
-        let mut s = format!("{marker}{checkbox}{first}");
+        let mut s = format!("{marker}{first}");
         for line in lines {
             s.push('\n');
             if line.is_empty() {

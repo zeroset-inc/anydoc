@@ -256,36 +256,19 @@ mod tests {
     }
 
     #[test]
-    fn unpreserved_edge_whitespace_is_discarded() {
-        // M3: w:t edge whitespace is significant only under
-        // xml:space="preserve".
+    fn unmarked_run_edge_whitespace_is_kept() {
+        // Converters that never write xml:space carry inter-word spacing on
+        // run edges; dropping it glues the words together.
         let document = format!(
             r#"<w:document {W}><w:body><w:p>
-            <w:r><w:t>lead</w:t></w:r>
-            <w:r><w:t>   discarded   </w:t></w:r>
-            <w:r><w:t xml:space="preserve"> kept </w:t></w:r>
-            <w:r><w:t>tail</w:t></w:r>
+            <w:r><w:t>This</w:t></w:r>
+            <w:r><w:t> by-law</w:t></w:r>
+            <w:r><w:t> grants</w:t></w:r>
             </w:p></w:body></w:document>"#
         );
         let doc = parse(&docx_parts(&[("word/document.xml", &document)])).unwrap();
         let Some(Block::Paragraph(inlines)) = doc.blocks.first() else { panic!() };
-        assert_eq!(crate::model::inlines_to_plain_text(inlines), "leaddiscarded kept tail");
-    }
-
-    #[test]
-    fn unpreserved_no_break_space_is_kept() {
-        // The xml:space contract governs XML whitespace; a no-break space is
-        // character data, so it survives an unmarked edge.
-        let nbsp = '\u{a0}';
-        let document = format!(
-            r#"<w:document {W}><w:body><w:p>
-            <w:r><w:t>before{nbsp}</w:t></w:r>
-            <w:r><w:t>after</w:t></w:r>
-            </w:p></w:body></w:document>"#
-        );
-        let doc = parse(&docx_parts(&[("word/document.xml", &document)])).unwrap();
-        let Some(Block::Paragraph(inlines)) = doc.blocks.first() else { panic!() };
-        assert_eq!(crate::model::inlines_to_plain_text(inlines), "before after");
+        assert_eq!(crate::model::inlines_to_plain_text(inlines), "This by-law grants");
     }
 
     #[test]
@@ -354,41 +337,5 @@ mod tests {
             })
             .collect();
         assert_eq!(headings, vec!["1. Intro", "2. Details"]);
-    }
-
-    #[test]
-    fn heading_style_emphasis_is_structural_but_direct_run_emphasis_survives() {
-        let document = format!(
-            r#"<w:document {W}><w:body>
-            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr>
-                <w:r><w:t>plain</w:t></w:r>
-                <w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve"> explicit</w:t></w:r>
-            </w:p></w:body></w:document>"#
-        );
-        let styles = format!(
-            r#"<w:styles {W}>
-            <w:style w:type="paragraph" w:styleId="H1">
-                <w:name w:val="heading 1"/><w:rPr><w:b/></w:rPr>
-            </w:style></w:styles>"#
-        );
-        let bytes = docx_parts(&[("word/document.xml", &document), ("word/styles.xml", &styles)]);
-        let doc = parse(&bytes).unwrap();
-        let Some(Block::Heading { content, .. }) = doc.blocks.first() else {
-            panic!("expected heading: {:?}", doc.blocks)
-        };
-        let styles: Vec<crate::model::Style> = content
-            .iter()
-            .filter_map(|inline| match inline {
-                Inline::Text { style, .. } => Some(*style),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            styles,
-            vec![
-                crate::model::Style::PLAIN,
-                crate::model::Style { bold: true, ..crate::model::Style::PLAIN },
-            ]
-        );
     }
 }

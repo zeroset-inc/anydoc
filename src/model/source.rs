@@ -5,18 +5,15 @@
 pub struct SourceUnit {
     /// The source structure this unit represents.
     pub kind: SourceUnitKind,
-    /// 1-based position in the source, including units that could not be
-    /// read or contained no blocks.
+    /// One-based position in the source, including empty or skipped units.
     pub ordinal: usize,
-    /// Source-defined name, when the unit has one (for example, a sheet
-    /// name). Presentation slides generally leave this unset.
+    /// Source-defined name, when the unit has one.
     pub name: Option<String>,
     /// Whether this unit was read and produced content.
     pub status: SourceUnitStatus,
-    /// Stable machine-readable explanation when [`Self::status`] is
-    /// [`SourceUnitStatus::Skipped`].
+    /// Stable machine-readable explanation for a skipped unit.
     pub reason: Option<String>,
-    /// Index of the first top-level block in [`crate::model::Document::blocks`].
+    /// Index of the first top-level block in [`super::Document::blocks`].
     pub start_block: usize,
     /// Exclusive index after the last top-level block in this unit.
     pub end_block: usize,

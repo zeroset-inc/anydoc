@@ -1,0 +1,15 @@
+---
+source: tests/snapshots.rs
+expression: output
+---
+<!-- anydoc:source-unit-start kind=slide ordinal=1 status=parsed -->
+
+## Quadratic formula
+
+Solve with $x=\frac{-b\pm\sqrt{b^{2}-4ac}}{2a}$
+
+$$
+\sum_{i=1}^{n}{x_{i}}=\sin{\left(\theta\right)}
+$$
+
+<!-- anydoc:source-unit-end kind=slide ordinal=1 status=parsed -->

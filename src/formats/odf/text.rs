@@ -10,7 +10,9 @@ use crate::model::{
 use crate::package::Package;
 use crate::package::xml::{Element, Node, ns};
 use crate::shared::assets::{AssetSink, media_type_for};
-use crate::shared::delta::StyleDelta;
+use crate::shared::blockstyle::StyledRun;
+use crate::shared::delta::{StyleDelta, rebase_emphasis};
+use crate::shared::math::mathml_to_tex;
 use crate::shared::text::{clean_text, collapse_ws};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -49,9 +51,11 @@ impl<'a, 'b> Ctx<'a, 'b> {
 
 pub fn parse_container(parent: &Element, ctx: &Ctx) -> Result<Vec<Block>, ConvertError> {
     let mut blocks = Vec::new();
+    let mut run = StyledRun::default();
     for child in parent.child_elems() {
-        parse_block_elem(child, ctx, &mut blocks)?;
+        parse_block_elem(child, ctx, &mut blocks, &mut run)?;
     }
+    run.flush(&mut blocks);
     Ok(blocks)
 }
 
@@ -59,23 +63,24 @@ fn parse_block_elem(
     elem: &Element,
     ctx: &Ctx,
     blocks: &mut Vec<Block>,
+    run: &mut StyledRun,
 ) -> Result<(), ConvertError> {
     let in_text = elem.ns.as_deref().is_some_and(|n| n == ns::TEXT);
     if in_text {
+        // Only a run of same-styled paragraphs continues a container.
+        if !elem.is(ns::TEXT, "p") {
+            run.flush(blocks);
+        }
         match elem.local.as_str() {
             "h" => {
                 let level = elem
                     .attr(ns::TEXT, "outline-level")
                     .and_then(|v| v.parse::<u8>().ok())
                     .unwrap_or(1);
-                // Resolve the paragraph chain even though its typography is
-                // structural, preserving cycle/resource validation.
-                paragraph_base(elem, ctx)?;
-                // Paragraph/heading typography is structural; only styles
-                // selected by descendants become inline emphasis.
-                let (inlines, boxes) = parse_inline_content_from(elem, ctx, StyleDelta::default())?;
+                let (inlines, boxes) = parse_inline_content(elem, ctx)?;
                 if !inlines_are_empty(&inlines) {
                     let mut content = inlines;
+                    rebase_emphasis(&mut content, paragraph_base(elem, ctx)?.resolve());
                     // ODF outline links target headings by their text; carry
                     // it as the heading's anchor id (without the number).
                     let anchor = Some(crate::model::inlines_to_plain_text(&content));
@@ -89,8 +94,20 @@ fn parse_block_elem(
             }
             "p" => {
                 let (inlines, boxes) = parse_inline_content(elem, ctx)?;
-                blocks.push(Block::Paragraph(inlines));
-                blocks.extend(boxes);
+                let style =
+                    elem.attr(ns::TEXT, "style-name").and_then(|n| ctx.styles.block_style(n));
+                match style {
+                    Some(style) => run.push(style, inlines, blocks),
+                    None => {
+                        run.flush(blocks);
+                        blocks.push(Block::Paragraph(inlines));
+                    }
+                }
+                if !boxes.is_empty() {
+                    // A frame is not part of the container's text.
+                    run.flush(blocks);
+                    blocks.extend(boxes);
+                }
                 return Ok(());
             }
             "list" => {
@@ -111,6 +128,7 @@ fn parse_block_elem(
         }
     }
     if elem.is(ns::TABLE, "table") {
+        run.flush(blocks);
         blocks.extend(parse_table(elem, ctx)?);
     }
     Ok(())
@@ -180,13 +198,16 @@ fn parse_list(
         let mut chain = ancestors.to_vec();
         chain.push(number);
         let mut item_blocks = Vec::new();
+        let mut item_run = StyledRun::default();
         for child in item.child_elems() {
             if child.is(ns::TEXT, "list") {
+                item_run.flush(&mut item_blocks);
                 item_blocks.extend(parse_list(child, ctx, depth + 1, style_name, &chain)?);
             } else {
-                parse_block_elem(child, ctx, &mut item_blocks)?;
+                parse_block_elem(child, ctx, &mut item_blocks, &mut item_run)?;
             }
         }
+        item_run.flush(&mut item_blocks);
         if header {
             // A list header has no marker: its blocks sit next to the list
             // and do not consume a number.
@@ -196,7 +217,7 @@ fn parse_list(
         }
         first_item = false;
         let label = item_label(ctx, style_name, depth, &chain);
-        current.items.push(ListItem { blocks: item_blocks, checked: None, marker_label: label });
+        current.items.push(ListItem { blocks: item_blocks, marker_label: label });
         next = current.start.saturating_add(current.items.len() as u64);
     }
     flush(&mut current, &mut out, next);
@@ -276,14 +297,6 @@ fn parse_inline_content(
     ctx: &Ctx,
 ) -> Result<(Vec<Inline>, Vec<Block>), ConvertError> {
     let base = paragraph_base(elem, ctx)?;
-    parse_inline_content_from(elem, ctx, base)
-}
-
-fn parse_inline_content_from(
-    elem: &Element,
-    ctx: &Ctx,
-    base: StyleDelta,
-) -> Result<(Vec<Inline>, Vec<Block>), ConvertError> {
     let mut out = Vec::new();
     let mut boxes = Vec::new();
     walk_inlines(elem, ctx, base, &mut out, &mut boxes)?;
@@ -410,6 +423,12 @@ pub(super) fn walk_frame(
         boxes.extend(parse_container(text_box, ctx)?);
         return Ok(());
     }
+    if let Some(object) = frame.find(ns::DRAW, "object")
+        && let Some(tex) = formula_tex(ctx, object)?
+    {
+        out.push(Inline::Math(tex));
+        return Ok(());
+    }
     let alt = frame
         .first_descendant(ns::SVG_COMPAT, "title")
         .map(|t| t.text())
@@ -428,6 +447,34 @@ pub(super) fn walk_frame(
         out.push(Inline::Image { alt, source: ImageSource::Unavailable });
     }
     Ok(())
+}
+
+/// The LaTeX of a `draw:object` holding a formula: MathML inline in the
+/// object, or in the `content.xml` of the object directory it links to.
+/// `None` for any other embedded object.
+pub(super) fn formula_tex(ctx: &Ctx, object: &Element) -> Result<Option<String>, ConvertError> {
+    if let Some(math) = object.find(ns::MATHML, "math") {
+        return Ok(Some(mathml_to_tex(math)).filter(|t| !t.is_empty()));
+    }
+    let href = object.attr(ns::XLINK, "href").unwrap_or("");
+    if href.is_empty() || crate::shared::uri::is_absolute_uri(href) {
+        return Ok(None);
+    }
+    let target = match crate::package::path::resolve("content.xml", &format!("{href}/content.xml"))
+    {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("skipping unresolvable object reference {href:?}: {e}");
+            return Ok(None);
+        }
+    };
+    let Some(tree) = ctx.pkg.borrow_mut().optional_xml_part(&target.path)? else {
+        return Ok(None);
+    };
+    let Some(math) = tree.first_descendant(ns::MATHML, "math") else {
+        return Ok(None);
+    };
+    Ok(Some(mathml_to_tex(math)).filter(|t| !t.is_empty()))
 }
 
 /// Failures degrade (log + `None`) per the unified policy; resource-limit
@@ -462,11 +509,24 @@ fn classify_href(href: &str) -> Option<LinkTarget> {
         if target.is_empty() {
             return None;
         }
-        return Some(LinkTarget::Anchor(target.to_string()));
+        return Some(LinkTarget::Anchor(crate::package::path::decode_fragment(target)));
     }
     if crate::shared::uri::is_absolute_uri(href) {
         Some(LinkTarget::External(href.to_string()))
     } else {
         Some(LinkTarget::Relative(href.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_href_fragments_are_percent_decoded() {
+        assert_eq!(
+            classify_href("#caf%C3%A9%20menu"),
+            Some(LinkTarget::Anchor("café menu".into()))
+        );
     }
 }

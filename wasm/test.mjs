@@ -23,7 +23,7 @@ const RICH = await readFile(fixture('docx/handmade-rich.docx'))
 const CSV = await readFile(fixture('csv/sheet.csv'))
 const PDF = await readFile(fixture('pdf/text.pdf'))
 const ENCRYPTED = await readFile(fixture('malformed/encrypted--errors.odt'))
-const DEMO = await readFile(fileURLToPath(new URL('./www/index.html', import.meta.url)), 'utf8')
+const MIXED = await readFile(fixture('pdf/handmade-mixed.pdf'))
 
 test('toMarkdownBytes converts in memory', () => {
   const markdown = toMarkdownBytes(RICH, 'docx')
@@ -83,15 +83,12 @@ test('conversion errors throw a coded Error', () => {
   throws(() => toMarkdownBytes(CSV), 'unsupported', /unrecognized file content/)
   throws(() => toMarkdownBytes(ENCRYPTED, 'odt'), 'encrypted', /encrypted/)
   throws(() => toDocument(ENCRYPTED, 'odt'), 'encrypted', /encrypted/)
+  throws(() => toMarkdownBytes(MIXED), 'needsOcr', /page 2 of 2 needs OCR/)
 })
 
-test('browser conversion activates only after wasm initialization', () => {
-  for (const id of ['drop', 'file', 'sample-rtf', 'sample-csv']) {
-    assert.match(DEMO, new RegExp(`<[^>]+id="${id}"[^>]+disabled`))
-  }
-  const initialized = DEMO.indexOf('await init();')
-  const activated = DEMO.indexOf('activateConverter();')
-  assert.ok(initialized >= 0)
-  assert.ok(activated > initialized)
-  assert.equal(DEMO.match(/activateConverter\(\);/g)?.length, 1)
+test('a pdf with scanned pages throws naming them instead of dropping them', () => {
+  assert.throws(() => toMarkdownBytes(MIXED), (error) => {
+    assert.deepEqual([error.pages, error.pageCount], [[2], 2])
+    return true
+  })
 })

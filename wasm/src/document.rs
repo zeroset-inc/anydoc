@@ -24,6 +24,7 @@ pub enum BlockKind {
     BlockQuote,
     CodeBlock,
     Rule,
+    Math,
 }
 
 #[derive(Serialize)]
@@ -48,7 +49,7 @@ pub struct Block {
     /// codeBlock.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
-    /// codeBlock.
+    /// codeBlock, math (LaTeX source without delimiters).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 }
@@ -94,6 +95,7 @@ impl From<model::Block> for Block {
                 Block { lang, text: Some(text), ..Block::of(BlockKind::CodeBlock) }
             }
             model::Block::Rule => Block::of(BlockKind::Rule),
+            model::Block::Math(tex) => Block { text: Some(tex), ..Block::of(BlockKind::Math) },
         }
     }
 }
@@ -108,13 +110,17 @@ pub enum InlineKind {
     Anchor,
     NoteRef,
     LineBreak,
+    /// An inline formula.
+    Math,
+    /// A checkbox control.
+    Checkbox,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Inline {
     pub kind: InlineKind,
-    /// text.
+    /// text; math (LaTeX source without delimiters).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// text.
@@ -138,6 +144,9 @@ pub struct Inline {
     /// noteRef: the id of the note in `Document.notes`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note_id: Option<String>,
+    /// checkbox: its state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
 }
 
 impl Inline {
@@ -152,6 +161,7 @@ impl Inline {
             source: None,
             anchor: None,
             note_id: None,
+            checked: None,
         }
     }
 }
@@ -181,6 +191,10 @@ impl From<model::Inline> for Inline {
                 Inline { note_id: Some(id), ..Inline::of(InlineKind::NoteRef) }
             }
             model::Inline::LineBreak => Inline::of(InlineKind::LineBreak),
+            model::Inline::Math(tex) => Inline { text: Some(tex), ..Inline::of(InlineKind::Math) },
+            model::Inline::Checkbox(checked) => {
+                Inline { checked: Some(checked), ..Inline::of(InlineKind::Checkbox) }
+            }
         }
     }
 }
@@ -316,9 +330,6 @@ impl From<model::List> for List {
 #[serde(rename_all = "camelCase")]
 pub struct ListItem {
     pub blocks: Vec<Block>,
-    /// Task-list state, when the item carries a checkbox.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub checked: Option<bool>,
     /// Literal marker text that overrides the list marker when the source
     /// number text cannot be reproduced from the marker and position alone
     /// (composite number text such as `1-a)`).
@@ -328,11 +339,7 @@ pub struct ListItem {
 
 impl From<model::ListItem> for ListItem {
     fn from(item: model::ListItem) -> Self {
-        ListItem {
-            blocks: blocks(item.blocks),
-            checked: item.checked,
-            marker_label: item.marker_label,
-        }
+        ListItem { blocks: blocks(item.blocks), marker_label: item.marker_label }
     }
 }
 
@@ -456,8 +463,7 @@ impl From<model::Note> for Note {
     }
 }
 
-/// An embedded binary asset (image, object payload). Bytes are always
-/// retained, so a document stays self-contained.
+/// An embedded binary asset with bounded retention and raster metadata.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Asset {
@@ -467,17 +473,40 @@ pub struct Asset {
     pub media_type: String,
     /// Package part or stream the asset came from, for provenance.
     pub origin_part: String,
+    pub byte_len: usize,
+    pub image_width: Option<usize>,
+    pub image_height: Option<usize>,
+    pub decode_width: Option<usize>,
+    pub decode_height: Option<usize>,
+    pub decoded_pixels: Option<u64>,
     /// Serialized as a `Uint8Array`.
-    pub data: serde_bytes::ByteBuf,
+    pub data: Option<serde_bytes::ByteBuf>,
+    pub omission_reason: Option<&'static str>,
 }
 
 impl From<model::Asset> for Asset {
     fn from(asset: model::Asset) -> Self {
+        let omission_reason = asset.omission_reason.map(|reason| match reason {
+            model::AssetOmissionReason::MaxAssetOccurrences => "max_asset_occurrences",
+            model::AssetOmissionReason::MaxUniqueAssets => "max_unique_assets",
+            model::AssetOmissionReason::MaxTotalBytes => "max_total_bytes",
+            model::AssetOmissionReason::MaxAssetBytes => "max_asset_bytes",
+            model::AssetOmissionReason::MaxDecodedPixels => "max_decoded_pixels",
+            model::AssetOmissionReason::MaxImagePixels => "max_image_pixels",
+            model::AssetOmissionReason::MinImageDimension => "min_image_dimension",
+        });
         Asset {
             id: asset.id.0 as u32,
             media_type: asset.media_type,
             origin_part: asset.origin_part,
-            data: serde_bytes::ByteBuf::from(asset.bytes),
+            byte_len: asset.byte_len,
+            image_width: asset.image_width,
+            image_height: asset.image_height,
+            decode_width: asset.decode_width,
+            decode_height: asset.decode_height,
+            decoded_pixels: asset.decoded_pixels,
+            data: asset.omission_reason.is_none().then(|| serde_bytes::ByteBuf::from(asset.bytes)),
+            omission_reason,
         }
     }
 }
